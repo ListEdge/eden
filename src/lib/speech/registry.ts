@@ -11,6 +11,7 @@ import { ConfigurationError } from '@/lib/errors';
 import { getSpeechProviderId } from '@/lib/config/env';
 import type { SpeechProvider, SpeechProviderFactory } from '@/lib/speech/types';
 import { elevenLabsProvider } from '@/lib/speech/providers/elevenlabs';
+import { openAISpeechProvider } from '@/lib/speech/providers/openai';
 
 const factories = new Map<string, SpeechProviderFactory>();
 const instances = new Map<string, SpeechProvider>();
@@ -36,4 +37,5 @@ export function getSpeechProvider(): SpeechProvider {
 }
 
 // Built-in providers.
+registerSpeechProvider('openai', () => openAISpeechProvider);
 registerSpeechProvider('elevenlabs', () => elevenLabsProvider);

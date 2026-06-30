@@ -36,11 +36,14 @@ const envSchema = z.object({
   // Optional fallback location used when a request names no place (e.g. "Christchurch, New Zealand").
   EDEN_DEFAULT_LOCATION: z.string().min(1).optional(),
 
-  // Speech (voice output) provider — see lib/speech. ElevenLabs is the first provider.
+  // Speech (voice output) provider — see lib/speech. OpenAI (default) and ElevenLabs.
   ELEVENLABS_API_KEY: z.string().min(1).optional(), // server-only
   ELEVENLABS_VOICE_ID: z.string().min(1).optional(),
   ELEVENLABS_MODEL: z.string().min(1).optional(),
   EDEN_SPEECH_PROVIDER: z.string().min(1).optional(),
+  // OpenAI voice (uses OPENAI_API_KEY). Works from a server on any OpenAI plan.
+  OPENAI_TTS_MODEL: z.string().min(1).optional(),
+  OPENAI_TTS_VOICE: z.string().min(1).optional(),
 
   // Operational
   EDEN_LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).optional(),
@@ -154,12 +157,12 @@ export interface SpeechConfig {
   modelId: string;
 }
 
-/** Server-only speech-provider config (ElevenLabs by default). */
+/** Server-only speech-provider config (ElevenLabs). */
 export function getSpeechConfig(): SpeechConfig {
   assertServer('ELEVENLABS_API_KEY');
   const e = env();
   if (!e.ELEVENLABS_API_KEY) {
-    throw new ConfigurationError('Voice output is not configured. Set ELEVENLABS_API_KEY.');
+    throw new ConfigurationError('ElevenLabs voice is not configured. Set ELEVENLABS_API_KEY.');
   }
   return {
     apiKey: e.ELEVENLABS_API_KEY,
@@ -169,9 +172,29 @@ export function getSpeechConfig(): SpeechConfig {
   };
 }
 
-/** Which speech provider to use. Default 'elevenlabs'. */
+export interface OpenAISpeechConfig {
+  apiKey: string;
+  model: string;
+  voice: string;
+}
+
+/** Server-only OpenAI voice config (reuses OPENAI_API_KEY). */
+export function getOpenAISpeechConfig(): OpenAISpeechConfig {
+  assertServer('OPENAI_API_KEY');
+  const e = env();
+  if (!e.OPENAI_API_KEY) {
+    throw new ConfigurationError('OpenAI voice needs OPENAI_API_KEY.');
+  }
+  return {
+    apiKey: e.OPENAI_API_KEY,
+    model: e.OPENAI_TTS_MODEL ?? 'tts-1',
+    voice: e.OPENAI_TTS_VOICE ?? 'alloy',
+  };
+}
+
+/** Which speech provider to use. Default 'openai' (works on any OpenAI plan from a server). */
 export function getSpeechProviderId(): string {
-  return env().EDEN_SPEECH_PROVIDER ?? 'elevenlabs';
+  return env().EDEN_SPEECH_PROVIDER ?? 'openai';
 }
 
 /** Soft checks for health/status reporting — never throw, never reveal values. */
@@ -188,7 +211,8 @@ export function configStatus(): {
     supabaseServer: Boolean(e.NEXT_PUBLIC_SUPABASE_URL && e.SUPABASE_SERVICE_ROLE_KEY),
     openai: Boolean(e.OPENAI_API_KEY),
     places: Boolean(e.GEOAPIFY_API_KEY),
-    speech: Boolean(e.ELEVENLABS_API_KEY),
+    // Voice works if either provider is configured (OpenAI is the default).
+    speech: Boolean(e.OPENAI_API_KEY || e.ELEVENLABS_API_KEY),
   };
 }
 
