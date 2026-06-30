@@ -33,7 +33,7 @@ const LOOP: Array<{ key: string; label: string; gate?: boolean }> = [
 const ENDPOINTS: Array<{ method: string; path: string; note: string }> = [
   { method: 'GET', path: '/api/health', note: 'Liveness + configured capabilities' },
   { method: 'GET', path: '/api/version', note: 'Build version, commit, runtime' },
-  { method: 'POST', path: '/api/eden/run', note: 'Submit intent (scaffold · 501)' },
+  { method: 'POST', path: '/api/eden/run', note: 'Submit intent · understand + Gate A' },
 ];
 
 const PLANE_TAGS: Record<string, string> = {

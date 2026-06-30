@@ -57,3 +57,12 @@ export const PERMISSION_LEVELS = {
 
 export type PlaneId = (typeof PLANES)[number]['id'];
 export type ModuleId = (typeof MODULES)[number]['id'];
+
+/**
+ * Pre-auth system identity. Until authentication and tenancy land, server-side
+ * intake runs as this fixed tenant + principal, which are seeded by
+ * supabase/migrations/0002. These IDs MUST match that migration exactly. They
+ * are not secrets, and they go away when real auth arrives.
+ */
+export const SYSTEM_TENANT_ID = '00000000-0000-4000-8000-000000000001';
+export const SYSTEM_PRINCIPAL_ID = '00000000-0000-4000-8000-000000000002';

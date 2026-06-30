@@ -28,7 +28,7 @@ The permanent base: structure, contracts, and the safe-to-ship logic.
 - A **provider-agnostic AI layer** with OpenAI wired in as the first provider.
 - **Supabase** client factories (browser, server, admin), all lazy and optional.
 - Three **API routes**: `/api/health`, `/api/version`, and `/api/eden/run` (the
-  last scaffolded to validate input and return `501`, writing nothing).
+  last scaffolded in M1, then made live in M2 — see below).
 - The **console UI** showing live system status.
 - The **foundation database migration**: identity/tenancy, requests, the Work
   Package status type, `work_packages`, and the append-only `events` log — with
@@ -36,6 +36,39 @@ The permanent base: structure, contracts, and the safe-to-ship logic.
 
 Everything behavioural beyond the pure helpers is stubbed behind these
 interfaces and fails loudly rather than fabricating results.
+
+---
+
+## ✅ Milestone 2 — First live intake (read-only)
+
+The first real pass through the loop. `POST /api/eden/run` now does genuine
+work for the safest kind of request, end to end, with a full audit trail. This
+is a **vertical slice** — it implements the front of the loop by drawing the
+first pieces from Phase 0 (Memory) and Phase 1 (Reasoning) below, rather than
+completing either phase in full.
+
+**Delivered:**
+
+- **Real persistence to Supabase** (via the service-role client, ahead of auth):
+  the Memory Plane now implements `createRequest`, `openWorkPackage`,
+  `saveSpecification`, `transition`, `appendEvent`, and `recordTrace`.
+- **A real reasoning step**: `understand` calls the configured model through the
+  provider abstraction and returns a schema-validated interpretation; `gateA`
+  applies a deterministic completeness check.
+- **The state machine, driven for real**: the Orchestrator opens a Work Package
+  at `RECEIVED`, records the reasoning trace, saves the specification, and
+  transitions `RECEIVED → SPECIFIED` (or `SPECIFIED → BLOCKED_ON_INPUT` when the
+  request is ambiguous) — and it is the only writer of status.
+- **Two new audit tables** (`reasoning_traces`, `status_transitions`),
+  append-only, plus a seeded pre-auth system identity (migration `0002`).
+
+**The behaviour you can see:** a clear request is understood and parked at
+`SPECIFIED` with its goal, constraints, and assumptions stored; a vague request
+**halts at Gate A** as `BLOCKED_ON_INPUT` with clarifying questions, instead of
+guessing. Planning and execution remain stubbed.
+
+**Still stubbed:** `writeWorkPackage` (planning-time persistence) and
+`getWorkPackage` (the trace-returning read), plus everything in Phases 2–5.
 
 ---
 

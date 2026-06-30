@@ -70,18 +70,20 @@ reasoning features that later milestones add.
 2. Choose a region close to your Vercel deployment for best performance.
 3. Wait for the project to finish provisioning.
 
-### Step 2: Run the database migration
+### Step 2: Run the database migrations
 
 1. In your Supabase project, open the **SQL Editor** (left sidebar).
 2. Click **New query**.
-3. Open the file [`supabase/migrations/0001_init.sql`](../supabase/migrations/0001_init.sql)
-   from this project, copy its entire contents, and paste it into the editor.
-4. Click **Run**.
+3. Open [`supabase/migrations/0001_init.sql`](../supabase/migrations/0001_init.sql),
+   copy its entire contents, paste it into the editor, and click **Run**.
+4. Repeat for [`supabase/migrations/0002_traces_transitions_seed.sql`](../supabase/migrations/0002_traces_transitions_seed.sql).
+   Always run migrations in number order (`0001` before `0002`).
 
-This creates the foundation tables and turns on the safety rules (the event log
-becomes append-only; tenant isolation is enabled). It's safe to run, and it only
-creates things that don't already exist. More detail is in
-[`supabase/README.md`](../supabase/README.md).
+`0001` creates the foundation tables and turns on the safety rules (the event log
+becomes append-only; tenant isolation is enabled). `0002` adds the reasoning-trace
+and status-transition tables and seeds the system identity the run endpoint uses.
+Both are safe to run and only create things that don't already exist. More detail
+is in [`supabase/README.md`](../supabase/README.md).
 
 ### Step 3: Collect your keys
 
@@ -135,9 +137,14 @@ won't be committed.)
 - **Zero-config is intentional.** If a variable is missing, the related feature
   is simply disabled, and any endpoint that needs it returns a clear
   configuration error — the app won't crash on boot.
-- **The run endpoint is a scaffold in M1.** `POST /api/eden/run` validates your
-  input and returns `501 Not Implemented` on purpose; it does not yet execute
-  anything. This is by design for Milestone 1.
+- **The run endpoint is live as of Milestone 2.** `POST /api/eden/run` actually
+  interprets your request and stores it. It needs both Supabase and an OpenAI key
+  configured (Part 2), and it needs the seed identity from `0002` to exist. You
+  can test it once deployed by sending a JSON body like
+  `{"raw_request": "Summarise our Q2 sales performance"}` to
+  `https://your-url.vercel.app/api/eden/run`. A clear request comes back at
+  status `SPECIFIED`; a vague one (e.g. `{"raw_request": "fix it"}`) comes back at
+  `BLOCKED_ON_INPUT` with clarifying questions.
 - **Secrets stay server-side.** Never put a real `SUPABASE_SERVICE_ROLE_KEY` or
   `OPENAI_API_KEY` in a `NEXT_PUBLIC_` variable — that would expose it to the
   browser.
