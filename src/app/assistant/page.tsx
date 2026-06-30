@@ -293,9 +293,8 @@ export default function AssistantPage() {
         </section>
       ) : (
         <p className="py-8 text-center text-sm text-muted">
-          Ask Eden to find somewhere to eat, then follow up naturally —
-          <br className="hidden sm:block" /> &ldquo;what about Thai?&rdquo;, &ldquo;which is
-          closest?&rdquo;
+          Talk to Eden about anything — think through an idea, ask a question, or
+          <br className="hidden sm:block" /> find somewhere to eat. It remembers the conversation.
         </p>
       )}
 

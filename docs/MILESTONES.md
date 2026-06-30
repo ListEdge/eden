@@ -164,6 +164,32 @@ Level-3 tool yet), and Phases 2–5.
 
 ---
 
+## ✅ Milestone 6 — Open-ended conversation
+
+Eden becomes a genuine assistant you can talk to about anything — not just
+restaurants — while keeping its ability to take the find-a-place action.
+
+**Delivered:**
+
+- **A capable conversational persona** (`reasoning.converse`): Eden can reason,
+  brainstorm, explain, give advice, and help you think, grounded in the
+  conversation. It stays honest about its limits — it won't claim to book, call,
+  email, access your accounts, or read live data, and it won't invent real-time
+  facts.
+- **Sharper action routing**: the find-a-place tool now fires only when you
+  actually want to *go* somewhere ("find Thai nearby"), not when you're merely
+  discussing or asking advice ("I'm thinking of opening a restaurant") — the
+  model makes that call, with keyword heuristics only as a fallback.
+
+**The behaviour you can see:** ask Eden to think through a business idea, explain
+something, or draft a message, and it just talks with you — but say "find me a
+coffee nearby" and it still runs the real search.
+
+**Still stubbed:** real-world actions (booking/calling/emailing), hands-free
+real-time voice, general planning beyond place search, approvals, Phases 2–5.
+
+---
+
 ## Phase 0 — Memory & the spine
 
 Make the source of truth real. Build the full database schema with its invariant
