@@ -36,6 +36,12 @@ const envSchema = z.object({
   // Optional fallback location used when a request names no place (e.g. "Christchurch, New Zealand").
   EDEN_DEFAULT_LOCATION: z.string().min(1).optional(),
 
+  // Speech (voice output) provider — see lib/speech. ElevenLabs is the first provider.
+  ELEVENLABS_API_KEY: z.string().min(1).optional(), // server-only
+  ELEVENLABS_VOICE_ID: z.string().min(1).optional(),
+  ELEVENLABS_MODEL: z.string().min(1).optional(),
+  EDEN_SPEECH_PROVIDER: z.string().min(1).optional(),
+
   // Operational
   EDEN_LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).optional(),
 });
@@ -142,12 +148,39 @@ export function getDefaultLocation(): string | null {
   return env().EDEN_DEFAULT_LOCATION ?? null;
 }
 
+export interface SpeechConfig {
+  apiKey: string;
+  voiceId: string;
+  modelId: string;
+}
+
+/** Server-only speech-provider config (ElevenLabs by default). */
+export function getSpeechConfig(): SpeechConfig {
+  assertServer('ELEVENLABS_API_KEY');
+  const e = env();
+  if (!e.ELEVENLABS_API_KEY) {
+    throw new ConfigurationError('Voice output is not configured. Set ELEVENLABS_API_KEY.');
+  }
+  return {
+    apiKey: e.ELEVENLABS_API_KEY,
+    // Default voice "Rachel"; override via ELEVENLABS_VOICE_ID.
+    voiceId: e.ELEVENLABS_VOICE_ID ?? '21m00Tcm4TlvDq8ikWAM',
+    modelId: e.ELEVENLABS_MODEL ?? 'eleven_turbo_v2_5',
+  };
+}
+
+/** Which speech provider to use. Default 'elevenlabs'. */
+export function getSpeechProviderId(): string {
+  return env().EDEN_SPEECH_PROVIDER ?? 'elevenlabs';
+}
+
 /** Soft checks for health/status reporting — never throw, never reveal values. */
 export function configStatus(): {
   supabasePublic: boolean;
   supabaseServer: boolean;
   openai: boolean;
   places: boolean;
+  speech: boolean;
 } {
   const e = env();
   return {
@@ -155,6 +188,7 @@ export function configStatus(): {
     supabaseServer: Boolean(e.NEXT_PUBLIC_SUPABASE_URL && e.SUPABASE_SERVICE_ROLE_KEY),
     openai: Boolean(e.OPENAI_API_KEY),
     places: Boolean(e.GEOAPIFY_API_KEY),
+    speech: Boolean(e.ELEVENLABS_API_KEY),
   };
 }
 

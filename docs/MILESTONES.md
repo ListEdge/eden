@@ -107,6 +107,33 @@ planning, approvals (no Level-3 tool yet), and Phases 2–5.
 
 ---
 
+## ✅ Milestone 4 — Voice & a real interface
+
+Eden gets a face and a voice. No more pasting JSON into an API tool.
+
+**Delivered:**
+
+- **A real Eden page** at `/assistant`: tap the mic and speak, or type. It shows
+  what you said, what Eden understood, and the results — and plays a spoken
+  reply. Linked from the home console.
+- **Speech in** uses the browser's built-in Web Speech API (free, no key); the
+  typed input is the fallback where speech isn't supported, so the page works
+  everywhere.
+- **Speech out** via a swappable speech layer (`src/lib/speech`) with
+  **ElevenLabs** as the first provider, plus a registry — another engine can be
+  added by changing one environment variable.
+- **The `/api/eden/speak` endpoint**: turns text into audio server-side and
+  streams it to the browser, so the ElevenLabs key never reaches the client.
+
+**The behaviour you can see:** say "I want Italian food for dinner tonight," and
+Eden runs the loop, lists real restaurants on screen, and reads the top few back
+to you out loud.
+
+**Still stubbed:** hands-free / real-time conversation (this is press-to-talk),
+the booking action, general-purpose planning, approvals, and Phases 2–5.
+
+---
+
 ## Phase 0 — Memory & the spine
 
 Make the source of truth real. Build the full database schema with its invariant

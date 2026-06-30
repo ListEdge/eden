@@ -14,6 +14,7 @@
 import { Panel } from '@/components/ui/Panel';
 import { StatusDot } from '@/components/ui/StatusDot';
 import { SystemStatus } from '@/components/SystemStatus';
+import Link from 'next/link';
 import { PLANES, MODULES, PERMISSION_LEVELS } from '@/lib/config/constants';
 
 /** The fixed lifecycle (Core Contract §2). Gates are halt points. */
@@ -47,6 +48,18 @@ export default function Home() {
   return (
     <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-8 px-6 py-12 sm:py-16">
       <SystemStatus />
+
+      <Link
+        href="/assistant"
+        className="flex items-center justify-between rounded-lg border border-verd-dim bg-verd/10 px-5 py-4 transition-colors hover:bg-verd/15"
+      >
+        <span className="flex flex-col">
+          <span className="font-mono text-sm text-mist">Talk to Eden</span>
+          <span className="mt-0.5 text-xs text-muted">Speak or type a request and hear it answer back.</span>
+        </span>
+        <span aria-hidden className="font-mono text-verd">→</span>
+      </Link>
+
 
       {/* Signature: the deterministic loop. */}
       <Panel
