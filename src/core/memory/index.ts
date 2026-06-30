@@ -37,6 +37,9 @@ import type {
 import type { RequestRecord, WorkPackageDraft } from '@/core/reasoning/types';
 import type { EventInput, TraceInput } from '@/core/audit/types';
 import type {
+  AppendTurnOptions,
+  ConversationRole,
+  ConversationTurn,
   GuardContext,
   NewRequest,
   WorkPackageWithTrace,
@@ -79,6 +82,18 @@ export interface MemoryAPI {
   getWorkPackage(wpId: string): Promise<WorkPackageWithTrace>;
   /** Scope fingerprint over approval-relevant fields (Build Spec R3). */
   computeFingerprint(wp: WorkPackage): string;
+
+  /** Open a new conversation; returns its id. */
+  createConversation(tenantId: string, principalId: string): Promise<string>;
+  /** Append one turn (message) to a conversation. Append-only. */
+  appendTurn(
+    conversationId: string,
+    role: ConversationRole,
+    content: string,
+    opts?: AppendTurnOptions,
+  ): Promise<void>;
+  /** Load the most recent turns of a conversation, oldest-first. */
+  getRecentTurns(conversationId: string, limit?: number): Promise<ConversationTurn[]>;
 }
 
 /**
@@ -276,5 +291,70 @@ export const memoryApi: MemoryAPI = {
 
   computeFingerprint(wp: WorkPackage): string {
     return computeScopeFingerprint(wp);
+  },
+
+  async createConversation(tenantId: string, principalId: string): Promise<string> {
+    const db = adminDb();
+    const { data, error } = await db
+      .from('conversations')
+      .insert({ tenant_id: tenantId, principal_id: principalId })
+      .select('id')
+      .single();
+    if (error || !data) throw dbError('createConversation', error);
+    return data.id as string;
+  },
+
+  async appendTurn(
+    conversationId: string,
+    role: ConversationRole,
+    content: string,
+    opts?: AppendTurnOptions,
+  ): Promise<void> {
+    const db = adminDb();
+    // Resolve tenant from the conversation so turns stay tenant-scoped.
+    const { data: convo, error: readErr } = await db
+      .from('conversations')
+      .select('tenant_id')
+      .eq('id', conversationId)
+      .single();
+    if (readErr || !convo) throw dbError('appendTurn.load', readErr);
+
+    const { error } = await db.from('conversation_turns').insert({
+      conversation_id: conversationId,
+      tenant_id: convo.tenant_id as string,
+      role,
+      content,
+      data: opts?.data ?? {},
+      work_package_id: opts?.workPackageId ?? null,
+    });
+    if (error) throw dbError('appendTurn', error);
+
+    // Touch the conversation's updated_at.
+    await db
+      .from('conversations')
+      .update({ updated_at: new Date().toISOString() })
+      .eq('id', conversationId);
+  },
+
+  async getRecentTurns(conversationId: string, limit = 8): Promise<ConversationTurn[]> {
+    const db = adminDb();
+    // Newest first for the limit, then reverse to chronological.
+    const { data, error } = await db
+      .from('conversation_turns')
+      .select('id, role, content, data, created_at')
+      .eq('conversation_id', conversationId)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (error) throw dbError('getRecentTurns', error);
+    const rows = Array.isArray(data) ? data : [];
+    return rows
+      .map((r) => ({
+        id: r.id as string,
+        role: r.role as ConversationRole,
+        content: r.content as string,
+        data: (r.data as Record<string, unknown>) ?? {},
+        created_at: r.created_at as string,
+      }))
+      .reverse();
   },
 };

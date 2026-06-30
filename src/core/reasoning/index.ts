@@ -14,6 +14,7 @@
 import { z } from 'zod';
 import { NotImplementedError } from '@/lib/errors';
 import { getReasoningProvider } from '@/lib/ai/registry';
+import type { Message } from '@/lib/ai/types';
 import type {
   ActionDraft,
   Criterion,
@@ -121,8 +122,20 @@ const PLACE_INTENT_SYSTEM = [
   '- "is_place_search": true if the user wants to find/visit/eat at a place, else false.',
   '- "what": short description of what they want to find (e.g. "restaurant").',
   '- "cuisine": the cuisine if any is mentioned (e.g. "italian"), else null.',
-  '- "location": the area/suburb/city to search, ONLY if the request states one, else null.',
-  'Do not guess a location that was not stated. Respond with JSON only.',
+  '- "location": the area/suburb/city to search, ONLY if stated now or earlier in the conversation, else null.',
+  'Do not guess a location that was never stated. Respond with JSON only.',
+].join('\n');
+
+const CONVERSE_SYSTEM = [
+  'You are Eden, a calm, concise personal assistant speaking out loud.',
+  'Answer the user using ONLY the conversation context provided. You may discuss,',
+  'compare, and reference things already found (e.g. restaurants in a previous list).',
+  'Rules:',
+  "- Do NOT invent facts you weren't given (prices, opening hours, ratings, weather, menus).",
+  '- You can find places, but you cannot yet take real-world actions like booking, calling,',
+  '  emailing, or paying. If asked to do one of those, say plainly that you can\'t do that yet.',
+  '- If you lack the information to answer, say so briefly rather than guessing.',
+  '- Keep replies to 1–3 short sentences, natural and suitable for being spoken aloud.',
 ].join('\n');
 
 const UNDERSTAND_SYSTEM = [
@@ -141,12 +154,14 @@ const UNDERSTAND_SYSTEM = [
 ].join('\n');
 
 export interface ReasoningPlane {
-  /** Stage 2: turn a raw request into structured understanding. */
-  understand(req: RequestRecord): Promise<Understanding>;
+  /** Stage 2: turn a raw request into structured understanding (optionally given prior conversation). */
+  understand(req: RequestRecord, contextText?: string): Promise<Understanding>;
   /** Gate A: decide whether intent is complete enough to plan, else ask. */
   gateA(u: Understanding): Promise<GateAResult>;
-  /** Determine whether a request wants to find a place, and extract cuisine/location. */
-  extractPlaceQuery(rawRequest: string, u: Understanding): Promise<PlaceIntent>;
+  /** Determine whether a request wants to find a place, and extract cuisine/location (context-aware). */
+  extractPlaceQuery(rawRequest: string, u: Understanding, contextText?: string): Promise<PlaceIntent>;
+  /** Produce a short, grounded conversational reply from prior context + the new message. */
+  converse(contextText: string, userMessage: string): Promise<string>;
   /** Stage 4: decompose into one or more Work Package drafts. Throws on a cyclic DAG. */
   plan(u: Understanding): Promise<WorkPackageDraft[]>;
   /**
@@ -160,16 +175,21 @@ export interface ReasoningPlane {
 }
 
 export const reasoningPlane: ReasoningPlane = {
-  async understand(req: RequestRecord): Promise<Understanding> {
+  async understand(req: RequestRecord, contextText?: string): Promise<Understanding> {
     const provider = getReasoningProvider();
+    const messages: Message[] = [{ role: 'system', content: UNDERSTAND_SYSTEM }];
+    if (contextText && contextText.trim()) {
+      messages.push({
+        role: 'system',
+        content: `Recent conversation for context (resolve references like "the first one" or "that place" against it):\n${contextText}`,
+      });
+    }
+    messages.push({ role: 'user', content: req.raw_text });
     const { data } = await provider.completeStructured({
       schema: understandingSchema,
       schemaName: 'Understanding',
       temperature: 0,
-      messages: [
-        { role: 'system', content: UNDERSTAND_SYSTEM },
-        { role: 'user', content: req.raw_text },
-      ],
+      messages,
     });
     return data;
   },
@@ -188,36 +208,58 @@ export const reasoningPlane: ReasoningPlane = {
     return { proceed: false, questions };
   },
 
-  async extractPlaceQuery(rawRequest: string, u: Understanding): Promise<PlaceIntent> {
-    // Heuristic baseline — always available, never fails.
+  async extractPlaceQuery(
+    rawRequest: string,
+    u: Understanding,
+    contextText?: string,
+  ): Promise<PlaceIntent> {
+    // Heuristic baseline — always available, never fails. A cuisine mention
+    // (e.g. "what about Thai?") counts as a place search even without a keyword.
+    const cuisineHit = scanCuisine(`${rawRequest} ${u.goal}`);
     const heuristic: PlaceIntent = {
-      is_place_search: looksLikePlaceSearch(rawRequest),
+      is_place_search: looksLikePlaceSearch(rawRequest) || cuisineHit !== null,
       what: 'place',
-      cuisine: scanCuisine(`${rawRequest} ${u.goal}`),
+      cuisine: cuisineHit,
       location: null,
     };
     try {
       const provider = getReasoningProvider();
+      const messages: Message[] = [{ role: 'system', content: PLACE_INTENT_SYSTEM }];
+      if (contextText && contextText.trim()) {
+        messages.push({
+          role: 'system',
+          content: `Recent conversation for context (use it to fill in a location or cuisine the user is still referring to):\n${contextText}`,
+        });
+      }
+      messages.push({ role: 'user',
+        content: `Request: ${rawRequest}\nInterpreted goal: ${u.goal}`,
+      });
       const { data } = await provider.completeStructured({
         schema: placeIntentSchema,
         schemaName: 'PlaceIntent',
         temperature: 0,
-        messages: [
-          { role: 'system', content: PLACE_INTENT_SYSTEM },
-          { role: 'user', content: `Request: ${rawRequest}\nInterpreted goal: ${u.goal}` },
-        ],
+        messages,
       });
       return {
-        // Trust the model OR an obvious keyword match (belt and suspenders).
         is_place_search: data.is_place_search || heuristic.is_place_search,
         what: data.what || heuristic.what,
         cuisine: data.cuisine ?? heuristic.cuisine,
         location: data.location ?? heuristic.location,
       };
     } catch {
-      // Model call failed — routing still works from heuristics alone.
       return heuristic;
     }
+  },
+
+  async converse(contextText: string, userMessage: string): Promise<string> {
+    const provider = getReasoningProvider();
+    const messages: Message[] = [{ role: 'system', content: CONVERSE_SYSTEM }];
+    if (contextText && contextText.trim()) {
+      messages.push({ role: 'system', content: `Conversation so far:\n${contextText}` });
+    }
+    messages.push({ role: 'user', content: userMessage });
+    const { text } = await provider.complete({ messages, temperature: 0.3, maxOutputTokens: 200 });
+    return text.trim();
   },
 
   plan() {

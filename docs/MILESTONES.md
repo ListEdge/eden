@@ -134,6 +134,36 @@ the booking action, general-purpose planning, approvals, and Phases 2–5.
 
 ---
 
+## ✅ Milestone 5 — Conversational memory
+
+Eden remembers the back-and-forth, so it stops feeling like a command box and
+starts feeling like an assistant.
+
+**Delivered:**
+
+- **Conversation memory** (`conversations`, `conversation_turns` — migration
+  `0003`): every turn (yours and Eden's) is stored, append-only, and the recent
+  turns are loaded as context on each new request.
+- **Context-aware reasoning**: UNDERSTAND and the place-intent step now receive
+  the recent conversation, so references resolve — "what about Thai?" reuses the
+  earlier area; "which is closest?" refers to the list just given.
+- **A grounded conversational reply** (`reasoning.converse`): when a turn isn't a
+  fresh place search, Eden answers from the conversation context only — it won't
+  invent facts, and it says plainly that it can't yet take real-world actions
+  (booking, calling) when asked.
+- **A real chat interface**: `/assistant` is now a back-and-forth conversation
+  with a "new chat" reset, each reply spoken aloud.
+
+**The behaviour you can see:** "Italian dinner tonight" → a list; "what about
+Thai instead?" → a new list in the same area; "which is the closest?" → Eden
+names it from the list it just gave you.
+
+**Still stubbed:** real-world actions (booking/calling/emailing), hands-free
+real-time voice, general-purpose planning beyond place search, approvals (no
+Level-3 tool yet), and Phases 2–5.
+
+---
+
 ## Phase 0 — Memory & the spine
 
 Make the source of truth real. Build the full database schema with its invariant

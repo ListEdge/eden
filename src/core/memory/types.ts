@@ -109,3 +109,22 @@ export interface WorkPackageWithTrace {
   events: unknown[];
   reasoning_refs: string[];
 }
+
+/* ----- Conversation memory ----- */
+
+export type ConversationRole = 'user' | 'assistant';
+
+/** One turn (message) in a conversation. */
+export interface ConversationTurn {
+  id: string;
+  role: ConversationRole;
+  content: string;
+  data: Record<string, unknown>;
+  created_at: string;
+}
+
+/** Options when appending a turn. */
+export interface AppendTurnOptions {
+  data?: Record<string, unknown>;
+  workPackageId?: string;
+}

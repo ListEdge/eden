@@ -1,21 +1,20 @@
 'use client';
 
 /**
- * Eden — Assistant (press to talk).
+ * Eden — Assistant (conversational, press to talk).
  *
- * A real interface for Eden: tap the mic and speak (browser speech recognition),
- * or type. Eden runs its loop on the server (/api/eden/run), the result is shown,
- * and a short spoken reply is played back via /api/eden/speak (ElevenLabs).
+ * A chat with Eden: tap the mic and speak, or type. Eden remembers the
+ * conversation, so follow-ups like "what about Thai?" or "which is closest?"
+ * resolve in context. Each reply is shown and spoken back (via /api/eden/speak).
  *
- * Speech recognition uses the browser's built-in Web Speech API where available
- * (Chrome, Edge, Safari). Where it isn't, the typed input is the fallback, so the
- * page works everywhere.
+ * Speech-in uses the browser's built-in Web Speech API where available (Chrome,
+ * Edge, Safari); the typed input is the fallback, so the page works everywhere.
  */
 
 import { useCallback, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 
-/* ---- Minimal Web Speech API typings (kept local; not in standard lib.dom) ---- */
+/* ---- Minimal Web Speech API typings (not in standard lib.dom) ---- */
 interface SpeechResultAlt {
   transcript: string;
 }
@@ -46,12 +45,17 @@ interface PlaceResult {
   website: string | null;
 }
 interface RunData {
+  conversation_id: string;
   status: string;
-  understanding?: { goal?: string };
-  gate_a?: { questions?: { id: string; text: string }[] };
+  reply: string;
   results?: PlaceResult[];
   error?: string;
-  note?: string;
+}
+
+interface ChatMessage {
+  role: 'user' | 'eden';
+  text: string;
+  results?: PlaceResult[];
 }
 
 function getRecognitionCtor(): SpeechRecognitionCtor | null {
@@ -63,59 +67,24 @@ function getRecognitionCtor(): SpeechRecognitionCtor | null {
   return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null;
 }
 
-/** Build the short sentence Eden speaks back, from the structured result. */
-function composeSpoken(d: RunData | null): string {
-  if (!d) return '';
-  if (d.status === 'COMPLETED' && Array.isArray(d.results)) {
-    const r = d.results;
-    if (r.length === 0) return "I searched, but didn't find anything matching that.";
-    const top = r.slice(0, 3).map((x) => x.name);
-    const names =
-      top.length > 1 ? `${top.slice(0, -1).join(', ')} and ${top[top.length - 1]}` : top[0];
-    return `I found ${r.length} options. The closest are ${names}. Want details on any of them?`;
-  }
-  if (d.status === 'BLOCKED_ON_INPUT') {
-    const q = d.gate_a?.questions?.[0]?.text;
-    return q ? `I need a little more information. ${q}` : 'I need a little more information to continue.';
-  }
-  if (d.status === 'FAILED') {
-    return d.error ? `Something went wrong. ${d.error}` : 'Something went wrong.';
-  }
-  if (d.status === 'SPECIFIED') {
-    return d.understanding?.goal
-      ? `I understood: ${d.understanding.goal}. I don't have a tool for that one yet.`
-      : "I understood your request, but I don't have a tool for that one yet.";
-  }
-  return 'Done.';
-}
-
-const STATUS_LABELS: Record<string, string> = {
-  COMPLETED: 'Completed',
-  BLOCKED_ON_INPUT: 'Needs clarification',
-  SPECIFIED: 'Understood',
-  FAILED: 'Failed',
-};
-
 export default function AssistantPage() {
   const recognitionSupported = useMemo(() => getRecognitionCtor() !== null, []);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [listening, setListening] = useState(false);
-  const [transcript, setTranscript] = useState('');
   const [typed, setTyped] = useState('');
   const [busy, setBusy] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const [phase, setPhase] = useState<'idle' | 'thinking' | 'speaking'>('idle');
-  const [result, setResult] = useState<RunData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pendingAudioUrl, setPendingAudioUrl] = useState<string | null>(null);
 
   const playAudio = useCallback(async (url: string) => {
     try {
-      if (audioRef.current) {
-        audioRef.current.pause();
-      }
+      if (audioRef.current) audioRef.current.pause();
       const audio = new Audio(url);
       audioRef.current = audio;
       setSpeaking(true);
@@ -123,9 +92,8 @@ export default function AssistantPage() {
       await audio.play();
       setPendingAudioUrl(null);
     } catch {
-      // Autoplay blocked — surface a manual play button.
       setSpeaking(false);
-      setPendingAudioUrl(url);
+      setPendingAudioUrl(url); // autoplay blocked — show a manual play button
     }
   }, []);
 
@@ -139,14 +107,11 @@ export default function AssistantPage() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text }),
         });
-        if (!res.ok) {
-          // Voice failed (e.g. key not set) — not fatal; the text answer still shows.
-          return;
-        }
+        if (!res.ok) return; // voice failed — the on-screen reply still stands
         const blob = await res.blob();
         await playAudio(URL.createObjectURL(blob));
       } catch {
-        // Ignore voice errors; the on-screen answer is the source of truth.
+        // ignore voice errors
       } finally {
         setPhase('idle');
       }
@@ -160,14 +125,17 @@ export default function AssistantPage() {
       if (!clean || busy) return;
       setBusy(true);
       setError(null);
-      setResult(null);
       setPendingAudioUrl(null);
+      setMessages((m) => [...m, { role: 'user', text: clean }]);
       setPhase('thinking');
       try {
         const res = await fetch('/api/eden/run', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ raw_request: clean }),
+          body: JSON.stringify({
+            raw_request: clean,
+            conversation_id: conversationId ?? undefined,
+          }),
         });
         const json = await res.json();
         if (!json.ok) {
@@ -176,8 +144,9 @@ export default function AssistantPage() {
           return;
         }
         const data = json.data as RunData;
-        setResult(data);
-        await speak(composeSpoken(data));
+        setConversationId(data.conversation_id);
+        setMessages((m) => [...m, { role: 'eden', text: data.reply, results: data.results }]);
+        await speak(data.reply);
       } catch {
         setError('Could not reach Eden. Check your connection and try again.');
         setPhase('idle');
@@ -185,7 +154,7 @@ export default function AssistantPage() {
         setBusy(false);
       }
     },
-    [busy, speak],
+    [busy, conversationId, speak],
   );
 
   const toggleListen = useCallback(() => {
@@ -196,7 +165,6 @@ export default function AssistantPage() {
     }
     const Ctor = getRecognitionCtor();
     if (!Ctor) return;
-
     const recognition = new Ctor();
     recognition.lang = 'en-NZ';
     recognition.continuous = false;
@@ -204,17 +172,12 @@ export default function AssistantPage() {
     recognitionRef.current = recognition;
 
     let finalText = '';
-    setTranscript('');
     setError(null);
-
     recognition.onresult = (e) => {
-      let interim = '';
+      finalText = '';
       for (let i = 0; i < e.results.length; i += 1) {
-        const r = e.results[i];
-        if (r.isFinal) finalText += r[0].transcript;
-        else interim += r[0].transcript;
+        if (e.results[i].isFinal) finalText += e.results[i][0].transcript;
       }
-      setTranscript((finalText + interim).trim());
     };
     recognition.onerror = (e) => {
       if (e.error && e.error !== 'aborted' && e.error !== 'no-speech') {
@@ -224,12 +187,8 @@ export default function AssistantPage() {
     recognition.onend = () => {
       setListening(false);
       const said = finalText.trim();
-      if (said) {
-        setTranscript(said);
-        void submit(said);
-      }
+      if (said) void submit(said);
     };
-
     recognition.start();
     setListening(true);
   }, [busy, listening, submit]);
@@ -237,33 +196,118 @@ export default function AssistantPage() {
   const onTypedSubmit = useCallback(() => {
     const text = typed;
     setTyped('');
-    setTranscript(text.trim());
     void submit(text);
   }, [typed, submit]);
 
-  const statusLabel = result ? (STATUS_LABELS[result.status] ?? result.status) : null;
+  const newConversation = useCallback(() => {
+    if (audioRef.current) audioRef.current.pause();
+    setConversationId(null);
+    setMessages([]);
+    setError(null);
+    setPendingAudioUrl(null);
+    setPhase('idle');
+  }, []);
+
+  const statusText = !recognitionSupported
+    ? 'voice input not supported here — type below'
+    : listening
+      ? 'listening… tap to stop'
+      : phase === 'thinking'
+        ? 'eden is thinking…'
+        : phase === 'speaking' || speaking
+          ? 'eden is speaking…'
+          : messages.length === 0
+            ? 'tap to talk'
+            : 'tap to continue';
 
   return (
-    <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-8 px-6 py-12 sm:py-16">
+    <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-6 px-6 py-10 sm:py-14">
       <header className="flex items-baseline justify-between">
         <div className="flex items-baseline gap-3">
           <span className="font-mono text-xl font-medium tracking-tight text-mist">eden</span>
           <span className="font-mono text-xs text-faint">assistant</span>
         </div>
-        <Link href="/" className="font-mono text-[0.7rem] text-faint hover:text-muted">
-          status →
-        </Link>
+        <div className="flex items-center gap-4">
+          {messages.length > 0 ? (
+            <button
+              type="button"
+              onClick={newConversation}
+              className="font-mono text-[0.7rem] text-faint hover:text-muted"
+            >
+              new chat
+            </button>
+          ) : null}
+          <Link href="/" className="font-mono text-[0.7rem] text-faint hover:text-muted">
+            status →
+          </Link>
+        </div>
       </header>
 
+      {/* Conversation */}
+      {messages.length > 0 ? (
+        <section className="flex flex-col gap-3">
+          {messages.map((msg, i) => (
+            <div
+              key={i}
+              className={msg.role === 'user' ? 'flex justify-end' : 'flex justify-start'}
+            >
+              <div
+                className={[
+                  'max-w-[85%] rounded-lg px-4 py-2.5 text-sm leading-relaxed',
+                  msg.role === 'user'
+                    ? 'bg-verd/15 text-mist'
+                    : 'border border-edge bg-panel/60 text-mist',
+                ].join(' ')}
+              >
+                <p>{msg.text}</p>
+                {msg.results && msg.results.length > 0 ? (
+                  <ul className="mt-2 flex flex-col divide-y divide-edge-soft border-t border-edge-soft">
+                    {msg.results.map((r, j) => (
+                      <li key={`${r.name}-${j}`} className="flex flex-col gap-0.5 py-2">
+                        <div className="flex items-baseline justify-between gap-3">
+                          <span className="text-sm text-mist">{r.name}</span>
+                          {typeof r.distanceMeters === 'number' ? (
+                            <span className="shrink-0 font-mono text-[0.65rem] text-faint">
+                              {(r.distanceMeters / 1000).toFixed(1)} km
+                            </span>
+                          ) : null}
+                        </div>
+                        {r.address ? <span className="text-xs text-muted">{r.address}</span> : null}
+                        {r.website ? (
+                          <a
+                            href={r.website}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="font-mono text-[0.7rem] text-verd hover:underline"
+                          >
+                            website →
+                          </a>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            </div>
+          ))}
+        </section>
+      ) : (
+        <p className="py-8 text-center text-sm text-muted">
+          Ask Eden to find somewhere to eat, then follow up naturally —
+          <br className="hidden sm:block" /> &ldquo;what about Thai?&rdquo;, &ldquo;which is
+          closest?&rdquo;
+        </p>
+      )}
+
       {/* Mic */}
-      <section className="flex flex-col items-center gap-5 py-6">
+      <section className="flex flex-col items-center gap-4 py-2">
         <button
           type="button"
           onClick={toggleListen}
           disabled={busy || !recognitionSupported}
           aria-label={listening ? 'Stop listening' : 'Start talking'}
           className={[
-            'flex h-24 w-24 items-center justify-center rounded-full border transition-colors',
+            'flex h-20 w-20 items-center justify-center rounded-full border transition-colors',
             listening
               ? 'border-verd bg-verd/15 text-verd eden-live'
               : 'border-edge bg-panel text-muted hover:border-verd-dim hover:text-mist',
@@ -272,107 +316,28 @@ export default function AssistantPage() {
         >
           <MicIcon />
         </button>
-        <p className="h-5 text-center font-mono text-[0.72rem] uppercase tracking-[0.18em] text-faint">
-          {!recognitionSupported
-            ? 'voice input not supported here — type below'
-            : listening
-              ? 'listening… tap to stop'
-              : phase === 'thinking'
-                ? 'eden is thinking…'
-                : phase === 'speaking' || speaking
-                  ? 'eden is speaking…'
-                  : 'tap to talk'}
+        <p className="h-4 text-center font-mono text-[0.7rem] uppercase tracking-[0.18em] text-faint">
+          {statusText}
         </p>
+        {pendingAudioUrl ? (
+          <button
+            type="button"
+            onClick={() => void playAudio(pendingAudioUrl)}
+            className="rounded-md border border-verd-dim bg-verd/10 px-3 py-1.5 font-mono text-xs text-verd"
+          >
+            ▶ Play Eden&apos;s reply
+          </button>
+        ) : null}
       </section>
 
-      {/* What you said */}
-      {transcript ? (
-        <div className="rounded-lg border border-edge-soft bg-panel/50 px-4 py-3">
-          <span className="font-mono text-[0.65rem] uppercase tracking-wider text-faint">You</span>
-          <p className="mt-1 text-sm text-mist">{transcript}</p>
-        </div>
-      ) : null}
-
-      {/* Manual play (if autoplay was blocked) */}
-      {pendingAudioUrl ? (
-        <button
-          type="button"
-          onClick={() => void playAudio(pendingAudioUrl)}
-          className="self-start rounded-md border border-verd-dim bg-verd/10 px-3 py-1.5 font-mono text-xs text-verd"
-        >
-          ▶ Play Eden&apos;s reply
-        </button>
-      ) : null}
-
-      {/* Error */}
       {error ? (
         <div className="rounded-lg border border-edge bg-panel/60 px-4 py-3 text-sm text-muted">
           {error}
         </div>
       ) : null}
 
-      {/* Result */}
-      {result ? (
-        <section className="flex flex-col gap-4">
-          <div className="flex items-center gap-2">
-            <span className="font-mono text-[0.65rem] uppercase tracking-wider text-faint">Eden</span>
-            {statusLabel ? (
-              <span className="rounded-full border border-edge px-2 py-0.5 font-mono text-[0.6rem] uppercase tracking-wider text-verd">
-                {statusLabel}
-              </span>
-            ) : null}
-          </div>
-
-          {result.understanding?.goal ? (
-            <p className="text-sm leading-relaxed text-mist">{result.understanding.goal}</p>
-          ) : null}
-
-          {Array.isArray(result.results) && result.results.length > 0 ? (
-            <ul className="flex flex-col divide-y divide-edge-soft overflow-hidden rounded-lg border border-edge">
-              {result.results.map((r, i) => (
-                <li key={`${r.name}-${i}`} className="flex flex-col gap-1 bg-panel/50 px-4 py-3">
-                  <div className="flex items-baseline justify-between gap-3">
-                    <span className="text-sm text-mist">{r.name}</span>
-                    {typeof r.distanceMeters === 'number' ? (
-                      <span className="shrink-0 font-mono text-[0.65rem] text-faint">
-                        {(r.distanceMeters / 1000).toFixed(1)} km
-                      </span>
-                    ) : null}
-                  </div>
-                  {r.address ? <span className="text-xs text-muted">{r.address}</span> : null}
-                  {r.website ? (
-                    <a
-                      href={r.website}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="font-mono text-[0.7rem] text-verd hover:underline"
-                    >
-                      website →
-                    </a>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-
-          {result.gate_a?.questions && result.gate_a.questions.length > 0 ? (
-            <ul className="flex flex-col gap-1.5">
-              {result.gate_a.questions.map((q) => (
-                <li key={q.id} className="text-sm text-muted">
-                  • {q.text}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-
-          {result.note ? (
-            <p className="text-xs leading-relaxed text-faint">{result.note}</p>
-          ) : null}
-        </section>
-      ) : null}
-
-      {/* Typed fallback */}
-      <div className="mt-auto flex items-center gap-2 border-t border-edge-soft pt-5">
+      {/* Typed input */}
+      <div className="mt-auto flex items-center gap-2 border-t border-edge-soft pt-4">
         <input
           value={typed}
           onChange={(e) => setTyped(e.target.value)}
@@ -399,8 +364,8 @@ export default function AssistantPage() {
 function MicIcon() {
   return (
     <svg
-      width="28"
-      height="28"
+      width="26"
+      height="26"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
