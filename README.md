@@ -87,7 +87,7 @@ every environment variable is explained in
 | ------ | ----------------- | ------------------------------------------------------- |
 | `GET`  | `/api/health`     | Liveness, plus which capabilities are configured.       |
 | `GET`  | `/api/version`    | Build version, git commit, and runtime.                 |
-| `POST` | `/api/eden/run`   | Submit intent. Scaffolded in M1 — validates and returns `501 Not Implemented`, writing nothing. |
+| `POST` | `/api/eden/run`   | Submit a request in plain English. Interprets it, stores it with a full audit trail, and either parks it at `SPECIFIED` or halts at `BLOCKED_ON_INPUT` with clarifying questions. Needs Supabase + OpenAI configured. |
 
 ---
 
