@@ -29,14 +29,36 @@ import type { PermissionLevel } from '@/core/work-package/types';
 
 export * from '@/core/reasoning/types';
 
-/** The shape the model must return for UNDERSTAND. */
+/**
+ * The shape the model must return for UNDERSTAND.
+ *
+ * Models occasionally answer a list field with a single sentence (or omit it)
+ * rather than a JSON array. Rather than reject otherwise-good output, we accept
+ * a string, an array, or null for the list fields and normalise to a string
+ * array. `goal` is likewise coerced to a single string.
+ */
+const stringList = z
+  .union([z.array(z.string()), z.string(), z.null()])
+  .transform((v): string[] => {
+    if (v == null) return [];
+    if (Array.isArray(v)) return v.map((s) => s.trim()).filter(Boolean);
+    const trimmed = v.trim();
+    return trimmed ? [trimmed] : [];
+  })
+  .default([]);
+
+const coercedString = z
+  .union([z.string(), z.array(z.string()), z.null()])
+  .transform((v): string => (Array.isArray(v) ? v.join(' ') : (v ?? '')))
+  .default('');
+
 const understandingSchema = z.object({
-  goal: z.string(),
-  scope: z.array(z.string()),
-  out_of_scope: z.array(z.string()),
-  constraints: z.array(z.string()),
-  assumptions: z.array(z.string()),
-  unknowns: z.array(z.string()),
+  goal: coercedString,
+  scope: stringList,
+  out_of_scope: stringList,
+  constraints: stringList,
+  assumptions: stringList,
+  unknowns: stringList,
 });
 
 const UNDERSTAND_SYSTEM = [
@@ -50,6 +72,7 @@ const UNDERSTAND_SYSTEM = [
   '- "assumptions": things you are taking as true in order to proceed.',
   '- "unknowns": ONLY genuinely missing information that would block planning.',
   '  If the request is clear enough to plan, return an empty list. Never invent unknowns.',
+  'Every list field must be a JSON array of short strings — use [] when there are none.',
   'Respond with a single JSON object containing exactly those keys.',
 ].join('\n');
 
