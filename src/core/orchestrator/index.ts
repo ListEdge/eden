@@ -1,21 +1,20 @@
 /**
  * Eden — Orchestrator.
  *
- * Sequences a Work Package through the lifecycle and now threads each request
- * through a CONVERSATION, so follow-ups resolve in context. It coordinates the
- * other planes but performs none of their work itself: Reasoning decides,
- * Execution acts (via tools), Memory persists. The Orchestrator remains the only
- * writer of Work Package status (Core Contract §2, Rule 10).
+ * Runs one conversation turn. For speed, a single combined Reasoning call
+ * (`routeTurn`) decides how to handle the turn and, for plain conversation,
+ * writes the reply — instead of separate understand/classify/converse calls.
  *
- * `runConversationTurn`:
- *   1. Loads recent conversation turns as context.
- *   2. UNDERSTAND + Gate A (context-aware).
- *   3. If the request is to find a place → builds a one-action plan and drives the
- *      real state machine (PLANNED → EXECUTING → VERIFYING → COMPLETED), running
- *      the `places.search` tool; missing location halts at BLOCKED_ON_INPUT, a
- *      tool failure goes to FAILED.
- *   4. Otherwise → produces a grounded conversational reply.
- *   Every turn (yours and Eden's) is appended to the conversation memory.
+ * Two paths:
+ *   • chat  → a fast, grounded reply. Lightweight: it records the conversation
+ *     turns but does not spin up the full Work Package audit pipeline.
+ *   • find_place → the audited action path: opens a Work Package and drives the
+ *     real state machine (PLANNED → EXECUTING → VERIFYING → COMPLETED) running
+ *     the `places.search` tool; a missing location halts at BLOCKED_ON_INPUT and
+ *     a tool failure goes to FAILED. The Orchestrator remains the only writer of
+ *     status (Core Contract §2, Rule 10).
+ *
+ * Every turn (yours and Eden's) is appended to the conversation memory.
  */
 
 import { createHash } from 'node:crypto';
@@ -24,14 +23,13 @@ import { getReasoningProvider } from '@/lib/ai/registry';
 import { SYSTEM_PRINCIPAL_ID, SYSTEM_TENANT_ID } from '@/lib/config/constants';
 import { getDefaultLocation } from '@/lib/config/env';
 import { memoryApi, type ConversationTurn } from '@/core/memory';
-import { reasoningPlane, type Question, type Understanding } from '@/core/reasoning';
+import { reasoningPlane } from '@/core/reasoning';
 import { toolRegistry } from '@/core/tool-registry';
 import { ensureToolsRegistered, PLACES_SEARCH_TOOL } from '@/core/tools';
 import type { PlaceResult } from '@/lib/places';
 import type {
   WorkPackageIntent,
   WorkPackageSpec,
-  WpStatus,
 } from '@/core/work-package/types';
 
 export * from '@/core/orchestrator/types';
@@ -39,25 +37,24 @@ export * from '@/core/orchestrator/types';
 /** Outcome of one conversation turn. */
 export interface TurnResult {
   conversation_id: string;
-  request_id: string;
-  work_package_id: string;
-  status: WpStatus;
-  understanding: Understanding;
-  gate_a: { proceeded: boolean; questions?: Question[] };
-  /** Natural-language reply for display + speech (set on every turn). */
+  status: string;
+  /** Natural-language reply for display + speech. */
   reply: string;
-  /** Present when a place-search ran successfully. */
+  /** Present when a place-search ran. */
   results?: PlaceResult[];
-  /** Present when the turn ended in FAILED. */
+  /** Present when the action path ended in FAILED. */
   error?: string;
-  note: string;
+  /** Present on the audited action path. */
+  work_package_id?: string;
+  note?: string;
 }
+
+const TENANT = SYSTEM_TENANT_ID;
+const PRINCIPAL = SYSTEM_PRINCIPAL_ID;
 
 /** Render recent turns as plain text the model can reason over. */
 function buildContext(turns: ConversationTurn[]): string {
-  return turns
-    .map((t) => `${t.role === 'user' ? 'User' : 'Eden'}: ${t.content}`)
-    .join('\n');
+  return turns.map((t) => `${t.role === 'user' ? 'User' : 'Eden'}: ${t.content}`).join('\n');
 }
 
 /** A compact, reference-friendly memory of a place-search result. */
@@ -73,11 +70,10 @@ function resultsToMemory(results: PlaceResult[], location: string, cuisine: stri
 
 /** A short spoken summary of a place-search result. */
 function resultsToReply(results: PlaceResult[], location: string, cuisine: string | null): string {
-  if (results.length === 0) {
-    return `I couldn't find any ${cuisine ?? ''} places near ${location}.`;
-  }
+  if (results.length === 0) return `I couldn't find any ${cuisine ?? ''} places near ${location}.`;
   const names = results.slice(0, 3).map((r) => r.name);
-  const list = names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names[0];
+  const list =
+    names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names[0];
   const c = cuisine ? `${cuisine} ` : '';
   return `I found ${results.length} ${c}options near ${location}. The closest ${names.length > 1 ? 'are' : 'is'} ${list}. Want details on any of them?`;
 }
@@ -86,117 +82,85 @@ export async function runConversationTurn(
   rawRequest: string,
   conversationId?: string,
 ): Promise<TurnResult> {
-  const tenantId = SYSTEM_TENANT_ID;
-  const principalId = SYSTEM_PRINCIPAL_ID;
-
-  // Resolve or open the conversation, and load prior turns as context.
-  const convoId = conversationId ?? (await memoryApi.createConversation(tenantId, principalId));
+  // Resolve/open the conversation and load prior turns as context.
+  const convoId = conversationId ?? (await memoryApi.createConversation(TENANT, PRINCIPAL));
   const priorTurns = conversationId ? await memoryApi.getRecentTurns(convoId, 8) : [];
   const contextText = buildContext(priorTurns);
 
   // Record the user's turn.
-  await memoryApi.appendTurn(convoId, 'user', rawRequest);
+  await memoryApi.appendTurn(convoId, TENANT, 'user', rawRequest);
 
-  // INGEST + open the Work Package at RECEIVED.
+  // One combined call: route + (for chat) reply.
+  const route = await reasoningPlane.routeTurn(rawRequest, contextText);
+
+  if (route.action !== 'find_place') {
+    // ── Fast conversational path (no Work Package) ──
+    const reply = route.reply || "I'm not sure how to help with that yet.";
+    await memoryApi.appendTurn(convoId, TENANT, 'assistant', reply);
+    return { conversation_id: convoId, status: 'replied', reply, note: 'Conversational reply.' };
+  }
+
+  // ── Audited action path: find a place ──
+  const location = route.location ?? getDefaultLocation();
+
   const request = await memoryApi.createRequest({
-    tenant_id: tenantId,
-    principal_id: principalId,
+    tenant_id: TENANT,
+    principal_id: PRINCIPAL,
     raw_text: rawRequest,
   });
   const wp = await memoryApi.openWorkPackage(
     { raw_request: rawRequest },
-    { tenantId, requestId: request.id, principalId },
+    { tenantId: TENANT, requestId: request.id, principalId: PRINCIPAL },
   );
 
-  // UNDERSTAND (context-aware) + trace + spec.
-  const understanding = await reasoningPlane.understand(
-    {
-      id: request.id,
-      tenant_id: tenantId,
-      principal_id: principalId,
-      raw_text: rawRequest,
-      received_at: request.received_at,
-    },
-    contextText,
-  );
-  await memoryApi.recordTrace({
-    work_package_id: wp.id,
-    stage: 'UNDERSTAND',
-    model: getReasoningProvider().defaultModel,
-    prompt_hash: createHash('sha256').update(rawRequest).digest('hex'),
-    input: { request_id: request.id, has_context: priorTurns.length > 0 },
-    output: understanding as unknown as Record<string, unknown>,
-  });
+  // Persist intent/spec + record the routing decision (in parallel), then move to SPECIFIED.
   const intent: WorkPackageIntent = {
     raw_request: rawRequest,
-    interpreted_goal: understanding.goal,
-    out_of_scope: understanding.out_of_scope,
+    interpreted_goal: route.goal,
+    out_of_scope: [],
   };
   const spec: WorkPackageSpec = {
-    constraints: understanding.constraints,
-    assumptions: understanding.assumptions,
-    inputs_required: understanding.unknowns,
+    constraints: [],
+    assumptions: [],
+    inputs_required: location ? [] : ['location'],
     acceptance_criteria: [],
   };
-  await memoryApi.saveSpecification(wp.id, { intent, spec });
+  await Promise.all([
+    memoryApi.saveSpecification(wp.id, { intent, spec }),
+    memoryApi.recordTrace({
+      work_package_id: wp.id,
+      stage: 'PLAN',
+      model: getReasoningProvider().defaultModel,
+      prompt_hash: createHash('sha256').update(rawRequest).digest('hex'),
+      input: { request_id: request.id, has_context: priorTurns.length > 0 },
+      output: { action: route.action, cuisine: route.cuisine, location: location ?? null },
+    }),
+  ]);
   await memoryApi.transition(wp.id, 'SPECIFIED', {
-    trigger: 'Reasoning.understand',
+    trigger: 'Reasoning.routeTurn',
     actor: 'orchestrator',
   });
 
-  const base = {
-    conversation_id: convoId,
-    request_id: request.id,
-    work_package_id: wp.id,
-    understanding,
-  };
-
-  // Gate A — completeness.
-  const gate = await reasoningPlane.gateA(understanding);
-  if (!gate.proceed) {
-    const reply =
-      gate.questions?.[0]?.text ?? 'I need a little more information to continue.';
-    await blockOnInput(wp.id, tenantId, gate.questions ?? [], 'Gate A fail');
-    await memoryApi.appendTurn(convoId, 'assistant', reply, { workPackageId: wp.id });
-    return {
-      ...base,
-      status: 'BLOCKED_ON_INPUT',
-      gate_a: { proceeded: false, questions: gate.questions },
-      reply,
-      note: 'Eden halted at Gate A and asked for clarification.',
-    };
-  }
-
-  // Place search, or a conversational reply?
-  const placeIntent = await reasoningPlane.extractPlaceQuery(rawRequest, understanding, contextText);
-
-  if (!placeIntent.is_place_search) {
-    // Conversational turn — grounded reply over the conversation context.
-    const reply = await reasoningPlane.converse(contextText, rawRequest);
-    await memoryApi.appendTurn(convoId, 'assistant', reply, { workPackageId: wp.id });
-    return {
-      ...base,
-      status: 'SPECIFIED',
-      gate_a: { proceeded: true },
-      reply,
-      note: 'Conversational reply (no tool action taken).',
-    };
-  }
-
-  // Place search needs a location.
-  const location = placeIntent.location ?? getDefaultLocation();
+  // Need a location to search.
   if (!location) {
-    const questions: Question[] = [
-      { id: 'q1', text: 'Which area should I search? (e.g. your suburb or city)', kind: 'free' },
-    ];
-    const reply = questions[0].text;
-    await blockOnInput(wp.id, tenantId, questions, 'Missing location');
-    await memoryApi.appendTurn(convoId, 'assistant', reply, { workPackageId: wp.id });
+    const reply = 'Which area should I search? (e.g. your suburb or city)';
+    await memoryApi.transition(wp.id, 'BLOCKED_ON_INPUT', {
+      trigger: 'Missing location',
+      actor: 'orchestrator',
+    });
+    await memoryApi.appendEvent({
+      tenant_id: TENANT,
+      work_package_id: wp.id,
+      type: 'CLARIFICATION_RAISED',
+      payload: { question: reply },
+      actor: 'orchestrator',
+    });
+    await memoryApi.appendTurn(convoId, TENANT, 'assistant', reply, { workPackageId: wp.id });
     return {
-      ...base,
+      conversation_id: convoId,
       status: 'BLOCKED_ON_INPUT',
-      gate_a: { proceeded: true },
       reply,
+      work_package_id: wp.id,
       note: 'Eden needs a location before it can search.',
     };
   }
@@ -206,7 +170,7 @@ export async function runConversationTurn(
   await memoryApi.transition(wp.id, 'PLANNED', {
     trigger: 'Planner (built-in: places.search)',
     actor: 'orchestrator',
-    guard_context: { tool: PLACES_SEARCH_TOOL, location, cuisine: placeIntent.cuisine },
+    guard_context: { tool: PLACES_SEARCH_TOOL, location, cuisine: route.cuisine },
   });
   await memoryApi.transition(wp.id, 'EXECUTING', {
     trigger: 'Gate B (level 1)',
@@ -215,14 +179,14 @@ export async function runConversationTurn(
 
   const tool = toolRegistry.get(PLACES_SEARCH_TOOL);
   const toolResult = await tool.run(
-    { location, cuisine: placeIntent.cuisine, limit: 8 },
+    { location, cuisine: route.cuisine, limit: 8 },
     `${wp.id}:${PLACES_SEARCH_TOOL}`,
   );
   await memoryApi.appendEvent({
-    tenant_id: tenantId,
+    tenant_id: TENANT,
     work_package_id: wp.id,
     type: 'TOOL_CALL',
-    payload: { tool: PLACES_SEARCH_TOOL, ok: toolResult.ok, location, cuisine: placeIntent.cuisine },
+    payload: { tool: PLACES_SEARCH_TOOL, ok: toolResult.ok, location, cuisine: route.cuisine },
     actor: 'execution',
   });
 
@@ -233,13 +197,13 @@ export async function runConversationTurn(
       guard_context: { error: toolResult.error?.message ?? 'tool failed' },
     });
     const reply = 'I tried to search, but the lookup failed. You could try again in a moment.';
-    await memoryApi.appendTurn(convoId, 'assistant', reply, { workPackageId: wp.id });
+    await memoryApi.appendTurn(convoId, TENANT, 'assistant', reply, { workPackageId: wp.id });
     return {
-      ...base,
+      conversation_id: convoId,
       status: 'FAILED',
-      gate_a: { proceeded: true },
-      error: toolResult.error?.message ?? 'The place search failed.',
       reply,
+      error: toolResult.error?.message ?? 'The place search failed.',
+      work_package_id: wp.id,
       note: 'The tool failed; the failure is recorded in the audit trail.',
     };
   }
@@ -255,43 +219,23 @@ export async function runConversationTurn(
     actor: 'orchestrator',
   });
 
-  const reply = resultsToReply(results, location, placeIntent.cuisine);
+  const reply = resultsToReply(results, location, route.cuisine);
   await memoryApi.appendTurn(
     convoId,
+    TENANT,
     'assistant',
-    resultsToMemory(results, location, placeIntent.cuisine),
+    resultsToMemory(results, location, route.cuisine),
     { data: { results }, workPackageId: wp.id },
   );
 
   return {
-    ...base,
+    conversation_id: convoId,
     status: 'COMPLETED',
-    gate_a: { proceeded: true },
-    results,
     reply,
+    results,
+    work_package_id: wp.id,
     note: `Eden ran the full loop and found ${results.length} place(s) near ${location}.`,
   };
-}
-
-/** Transition a package to BLOCKED_ON_INPUT and log the clarification. */
-async function blockOnInput(
-  wpId: string,
-  tenantId: string,
-  questions: Question[],
-  trigger: string,
-): Promise<void> {
-  await memoryApi.transition(wpId, 'BLOCKED_ON_INPUT', {
-    trigger,
-    actor: 'orchestrator',
-    guard_context: { question_count: questions.length },
-  });
-  await memoryApi.appendEvent({
-    tenant_id: tenantId,
-    work_package_id: wpId,
-    type: 'CLARIFICATION_RAISED',
-    payload: { questions },
-    actor: 'orchestrator',
-  });
 }
 
 export interface Orchestrator {

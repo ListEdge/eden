@@ -88,6 +88,7 @@ export interface MemoryAPI {
   /** Append one turn (message) to a conversation. Append-only. */
   appendTurn(
     conversationId: string,
+    tenantId: string,
     role: ConversationRole,
     content: string,
     opts?: AppendTurnOptions,
@@ -306,34 +307,21 @@ export const memoryApi: MemoryAPI = {
 
   async appendTurn(
     conversationId: string,
+    tenantId: string,
     role: ConversationRole,
     content: string,
     opts?: AppendTurnOptions,
   ): Promise<void> {
     const db = adminDb();
-    // Resolve tenant from the conversation so turns stay tenant-scoped.
-    const { data: convo, error: readErr } = await db
-      .from('conversations')
-      .select('tenant_id')
-      .eq('id', conversationId)
-      .single();
-    if (readErr || !convo) throw dbError('appendTurn.load', readErr);
-
     const { error } = await db.from('conversation_turns').insert({
       conversation_id: conversationId,
-      tenant_id: convo.tenant_id as string,
+      tenant_id: tenantId,
       role,
       content,
       data: opts?.data ?? {},
       work_package_id: opts?.workPackageId ?? null,
     });
     if (error) throw dbError('appendTurn', error);
-
-    // Touch the conversation's updated_at.
-    await db
-      .from('conversations')
-      .update({ updated_at: new Date().toISOString() })
-      .eq('id', conversationId);
   },
 
   async getRecentTurns(conversationId: string, limit = 8): Promise<ConversationTurn[]> {

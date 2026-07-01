@@ -190,6 +190,31 @@ real-time voice, general planning beyond place search, approvals, Phases 2–5.
 
 ---
 
+## ✅ Milestone 7 — Faster replies
+
+A latency pass so conversation feels closer to instant.
+
+**Delivered:**
+
+- **One combined Reasoning call** (`routeTurn`) replaces the previous three
+  sequential calls (understand + classify + converse) on the hot path: a single
+  call decides whether a turn is an action or chat and, for chat, writes the
+  reply.
+- **Lightweight chat**: plain conversation no longer opens a Work Package or
+  drives the state machine — it just records the turn and replies. The full
+  audited pipeline is reserved for actions (the place search keeps its complete
+  trail).
+- **Leaner writes**: conversation turns no longer do an extra per-message
+  database lookup, and the action path persists its spec and trace in parallel.
+
+**The effect:** noticeably quicker time-to-reply, especially for ordinary
+conversation, with the audited action path unchanged in behaviour.
+
+**Still stubbed:** real-world actions, hands-free real-time voice, general
+planning beyond place search, approvals, Phases 2–5.
+
+---
+
 ## Phase 0 — Memory & the spine
 
 Make the source of truth real. Build the full database schema with its invariant

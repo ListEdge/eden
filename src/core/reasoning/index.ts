@@ -150,6 +150,52 @@ const CONVERSE_SYSTEM = [
   'longer, but stay clear and avoid rambling. Be encouraging and practical.',
 ].join('\n');
 
+/**
+ * Combined router + responder. One model call that both decides how to handle a
+ * turn and, for plain conversation, writes the reply — replacing the separate
+ * understand + classify + converse calls on the hot path, for speed.
+ */
+const routeSchema = z.object({
+  action: z
+    .union([z.literal('find_place'), z.literal('chat'), z.string(), z.null()])
+    .transform((v): 'find_place' | 'chat' => (v === 'find_place' ? 'find_place' : 'chat'))
+    .default('chat'),
+  goal: coercedString,
+  reply: coercedString,
+  cuisine: coercedNullableString,
+  location: coercedNullableString,
+});
+
+/** Result of routing a turn. */
+export interface TurnRoute {
+  action: 'find_place' | 'chat';
+  goal: string;
+  reply: string;
+  cuisine: string | null;
+  location: string | null;
+}
+
+const ROUTER_SYSTEM = [
+  'You are Eden, a warm, thoughtful personal assistant. Decide how to handle the message and respond in ONE step.',
+  'Return a single JSON object with these keys:',
+  '- "action": "find_place" ONLY if the user wants you to find a specific place to GO TO now',
+  '  (restaurant, café, bar, venue) — e.g. "find an Italian restaurant", "coffee nearby",',
+  '  "what about Thai instead". Asking advice or discussing places in general is "chat".',
+  '- "goal": a short one-line summary of what the user wants.',
+  '- "cuisine": if find_place and a cuisine is mentioned, give it (e.g. "italian"), else null.',
+  '- "location": if find_place, the area/suburb/city to search — from this message or earlier in',
+  '  the conversation — else null. Never invent a location.',
+  '- "reply": if action is "chat", your spoken reply. If "find_place", use "".',
+  'When writing "reply": be warm, concise, and natural — it is spoken aloud, so keep it to a few',
+  'sentences unless more is truly needed. Use the conversation context to resolve references',
+  'like "that place" or "the first one".',
+  'Be honest about limits: you can find places, but you cannot yet book, call, email, message,',
+  "pay, or access the user's calendar, files, or accounts, and you cannot read live data",
+  '(current weather, live hours or availability). If asked, say so plainly. Do not invent',
+  'real-time facts. General knowledge and reasoning are fine.',
+  'Respond with JSON only.',
+].join('\n');
+
 const UNDERSTAND_SYSTEM = [
   'You are the Reasoning Plane of Eden, an execution-first AI operating system.',
   'Your only job in this step is to UNDERSTAND a request — not to plan it or act on it.',
@@ -174,6 +220,8 @@ export interface ReasoningPlane {
   extractPlaceQuery(rawRequest: string, u: Understanding, contextText?: string): Promise<PlaceIntent>;
   /** Produce a short, grounded conversational reply from prior context + the new message. */
   converse(contextText: string, userMessage: string): Promise<string>;
+  /** One-call router + responder for the hot path: decide action vs chat, and reply if chat. */
+  routeTurn(rawRequest: string, contextText?: string): Promise<TurnRoute>;
   /** Stage 4: decompose into one or more Work Package drafts. Throws on a cyclic DAG. */
   plan(u: Understanding): Promise<WorkPackageDraft[]>;
   /**
@@ -273,6 +321,40 @@ export const reasoningPlane: ReasoningPlane = {
     messages.push({ role: 'user', content: userMessage });
     const { text } = await provider.complete({ messages, temperature: 0.5, maxOutputTokens: 500 });
     return text.trim();
+  },
+
+  async routeTurn(rawRequest: string, contextText?: string): Promise<TurnRoute> {
+    const provider = getReasoningProvider();
+    const messages: Message[] = [{ role: 'system', content: ROUTER_SYSTEM }];
+    if (contextText && contextText.trim()) {
+      messages.push({ role: 'system', content: `Conversation so far:\n${contextText}` });
+    }
+    messages.push({ role: 'user', content: rawRequest });
+    try {
+      const { data } = await provider.completeStructured({
+        schema: routeSchema,
+        schemaName: 'TurnRoute',
+        temperature: 0.4,
+        messages,
+      });
+      return {
+        action: data.action,
+        goal: data.goal || rawRequest,
+        reply: data.reply,
+        cuisine: data.cuisine,
+        location: data.location,
+      };
+    } catch {
+      // Fallback if the model call fails: route by keyword, generic reply for chat.
+      const isPlace = looksLikePlaceSearch(rawRequest) || scanCuisine(rawRequest) !== null;
+      return {
+        action: isPlace ? 'find_place' : 'chat',
+        goal: rawRequest,
+        reply: isPlace ? '' : "I'm having trouble responding right now — could you try that again?",
+        cuisine: scanCuisine(rawRequest),
+        location: null,
+      };
+    }
   },
 
   plan() {
