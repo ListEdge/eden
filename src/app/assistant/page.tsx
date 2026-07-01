@@ -166,6 +166,7 @@ export default function AssistantPage() {
   const modeRef = useRef<CoreMode>('idle');
   const inputRef = useRef<HTMLInputElement | null>(null);
   const feedRef = useRef<HTMLDivElement | null>(null);
+  const briefedRef = useRef(false);
 
   const [awake, setAwake] = useState(false);
   const [conversationId, setConversationId] = useState<string | null>(null);
@@ -566,10 +567,39 @@ export default function AssistantPage() {
     setActiveProject(null);
   }, []);
 
+  const runBrief = useCallback(async () => {
+    try {
+      const res = await fetch('/api/eden/brief', { method: 'POST' });
+      const json = await res.json();
+      if (json.ok && json.data.reply) {
+        setMessages((m) => [...m, { role: 'eden', text: json.data.reply as string }]);
+        if (Array.isArray(json.data.projects)) {
+          setProjects(json.data.projects as ProjectItem[]);
+          setProjectsLoaded(true);
+        }
+        if (json.data.audio_base64) {
+          const blob = base64ToBlob(
+            json.data.audio_base64,
+            json.data.audio_content_type ?? 'audio/mpeg',
+          );
+          await playAudio(URL.createObjectURL(blob));
+        }
+      }
+    } catch {
+      // Briefing is a nicety — stay silent if it fails.
+    }
+  }, [playAudio]);
+
   const wake = useCallback(() => {
     setAwake(true);
     window.setTimeout(() => inputRef.current?.focus(), 700);
-  }, []);
+    if (!briefedRef.current) {
+      briefedRef.current = true;
+      window.setTimeout(() => {
+        void runBrief();
+      }, 850);
+    }
+  }, [runBrief]);
 
   const sleep = useCallback(() => {
     if (audioRef.current) audioRef.current.pause();
@@ -892,14 +922,8 @@ export default function AssistantPage() {
               <div className="p-h">Quick Commands</div>
               <div className="p-body">
                 <div className="qc">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (!awake) wake();
-                      inputRef.current?.focus();
-                    }}
-                  >
-                    <span className="ic">+</span>New task
+                  <button type="button" onClick={() => void runBrief()}>
+                    <span className="ic">✦</span>Briefing
                   </button>
                   <button type="button" onClick={() => void submit('Find good restaurants near me')}>
                     <span className="ic">◈</span>Restaurants near me

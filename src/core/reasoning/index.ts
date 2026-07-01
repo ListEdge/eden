@@ -225,6 +225,9 @@ const ROUTER_SYSTEM = [
   'feels like the idea has taken enough shape, offer to put together a full written plan.',
   'Keep spoken replies BRIEF and natural — 1–3 short sentences by default — since they are read aloud.',
   'Use the conversation context to resolve references like "that place" or "the first one".',
+  "You are aware of the user's saved projects (listed above, when present). When it is genuinely",
+  'relevant, reference or connect them (e.g. how a new idea relates to an existing project), but do',
+  'not force a mention of projects into every reply.',
   'Be honest about limits: you CAN find places, produce written plans, search the web for current',
   "information, and check the weather. You cannot yet book, call, email, message, pay, build or deploy",
   "software, or access the user's private accounts, calendar, or files. If asked for one of those, say",
@@ -238,6 +241,18 @@ const SEARCH_ANSWER_SYSTEM = [
   'clearly answer the question, say what you did find and note that you couldn\'t confirm the rest.',
   'Do not invent facts beyond the results. Do not print URLs or say "according to source 1"; just',
   'answer plainly. The user can see the sources separately.',
+].join('\n');
+
+const BRIEF_SYSTEM = [
+  'You are Eden, a warm, sharp AI co-founder greeting the user as they open you.',
+  'Give a SHORT spoken briefing of their world based on the projects listed below.',
+  'Guidelines:',
+  '- 1–3 short sentences, natural to say aloud. No lists, no headings.',
+  '- Open with a brief, friendly greeting.',
+  '- If there are active projects, mention what stands out (name the most relevant one or two) and',
+  '  lightly suggest what they might pick up — as a good co-founder would.',
+  '- If there are no projects yet, welcome them warmly and invite them to start something.',
+  '- Do not invent projects or details beyond what is listed. Do not read out every project.',
 ].join('\n');
 
 /* ----- Business plan generation ----- */
@@ -349,7 +364,9 @@ export interface ReasoningPlane {
   /** Produce a short, grounded conversational reply from prior context + the new message. */
   converse(contextText: string, userMessage: string): Promise<string>;
   /** One-call router + responder for the hot path: decide action vs chat, and reply if chat. */
-  routeTurn(rawRequest: string, contextText?: string): Promise<TurnRoute>;
+  routeTurn(rawRequest: string, contextText?: string, worldContext?: string): Promise<TurnRoute>;
+  /** Produce a short spoken briefing of the user's world (their projects). */
+  brief(worldContext: string, contextText?: string): Promise<string>;
   /** Compose a brief, grounded spoken reply from web-search results. */
   summarizeSearch(
     query: string,
@@ -460,9 +477,16 @@ export const reasoningPlane: ReasoningPlane = {
     return text.trim();
   },
 
-  async routeTurn(rawRequest: string, contextText?: string): Promise<TurnRoute> {
+  async routeTurn(
+    rawRequest: string,
+    contextText?: string,
+    worldContext?: string,
+  ): Promise<TurnRoute> {
     const provider = getReasoningProvider();
     const messages: Message[] = [{ role: 'system', content: ROUTER_SYSTEM }];
+    if (worldContext && worldContext.trim()) {
+      messages.push({ role: 'system', content: worldContext });
+    }
     if (contextText && contextText.trim()) {
       messages.push({ role: 'system', content: `Conversation so far:\n${contextText}` });
     }
@@ -517,6 +541,17 @@ export const reasoningPlane: ReasoningPlane = {
       content: `Question: ${query}\n\n${draft}Search results:\n${sources || '(no results)'}`,
     });
     const { text } = await provider.complete({ messages, temperature: 0.3, maxOutputTokens: 400 });
+    return text.trim();
+  },
+
+  async brief(worldContext: string, contextText?: string): Promise<string> {
+    const provider = getReasoningProvider();
+    const messages: Message[] = [{ role: 'system', content: BRIEF_SYSTEM }];
+    if (contextText && contextText.trim()) {
+      messages.push({ role: 'system', content: `Recent context:\n${contextText}` });
+    }
+    messages.push({ role: 'user', content: `${worldContext}\n\nGive the briefing now.` });
+    const { text } = await provider.complete({ messages, temperature: 0.5, maxOutputTokens: 220 });
     return text.trim();
   },
 

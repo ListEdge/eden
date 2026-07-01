@@ -22,7 +22,7 @@ import { NotImplementedError } from '@/lib/errors';
 import { getReasoningProvider } from '@/lib/ai/registry';
 import { SYSTEM_PRINCIPAL_ID, SYSTEM_TENANT_ID } from '@/lib/config/constants';
 import { getDefaultLocation } from '@/lib/config/env';
-import { memoryApi, type ConversationTurn } from '@/core/memory';
+import { memoryApi, type ConversationTurn, type Project } from '@/core/memory';
 import { reasoningPlane, type BusinessPlan } from '@/core/reasoning';
 import { toolRegistry } from '@/core/tool-registry';
 import { ensureToolsRegistered, PLACES_SEARCH_TOOL, WEB_SEARCH_TOOL, WEATHER_TOOL } from '@/core/tools';
@@ -121,20 +121,37 @@ function weatherToReply(w: WeatherResult): string {
   return `It's ${temp} and ${w.description.toLowerCase()} in ${w.locationLabel}${feels}${wind}.`;
 }
 
+/** A compact description of the user's projects, for cross-project awareness. */
+function buildWorldContext(projects: Project[]): string {
+  if (projects.length === 0) return 'The user has no saved projects yet.';
+  const lines = projects.slice(0, 12).map((p) => {
+    const status = p.status === 'archived' ? 'archived' : 'active';
+    const summary = p.summary ? ` — ${p.summary}` : '';
+    return `- ${p.title} (${status})${summary}`;
+  });
+  return `The user's saved projects (most recently updated first):\n${lines.join('\n')}`;
+}
+
 export async function runConversationTurn(
   rawRequest: string,
   conversationId?: string,
 ): Promise<TurnResult> {
-  // Resolve/open the conversation and load prior turns as context.
+  // Resolve/open the conversation, then load prior turns and project awareness
+  // in parallel. Projects are best-effort: if the table isn't there yet, the
+  // turn still runs (just without cross-project awareness).
   const convoId = conversationId ?? (await memoryApi.createConversation(TENANT, PRINCIPAL));
-  const priorTurns = conversationId ? await memoryApi.getRecentTurns(convoId, 8) : [];
+  const [priorTurns, projects] = await Promise.all([
+    conversationId ? memoryApi.getRecentTurns(convoId, 8) : Promise.resolve<ConversationTurn[]>([]),
+    memoryApi.listProjects(TENANT, 20).catch(() => [] as Project[]),
+  ]);
   const contextText = buildContext(priorTurns);
+  const worldContext = buildWorldContext(projects);
 
   // Record the user's turn.
   await memoryApi.appendTurn(convoId, TENANT, 'user', rawRequest);
 
   // One combined call: route + (for chat) reply.
-  const route = await reasoningPlane.routeTurn(rawRequest, contextText);
+  const route = await reasoningPlane.routeTurn(rawRequest, contextText, worldContext);
 
   if (route.action === 'generate_plan') {
     // ── Written plan (thinking deliverable; lightweight, no Work Package) ──
@@ -389,3 +406,16 @@ export const orchestrator: Orchestrator = {
     throw new NotImplementedError('Orchestrator.drive', 'Orchestration milestone (Phases 1–4)');
   },
 };
+
+/** Produce a spoken briefing of the user's world (their projects) for the wake greeting. */
+export async function runBriefing(): Promise<{ reply: string; projects: Project[] }> {
+  let projects: Project[] = [];
+  try {
+    projects = await memoryApi.listProjects(TENANT, 20);
+  } catch {
+    projects = [];
+  }
+  const worldContext = buildWorldContext(projects);
+  const reply = await reasoningPlane.brief(worldContext);
+  return { reply, projects };
+}
