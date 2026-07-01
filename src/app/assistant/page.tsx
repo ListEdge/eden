@@ -50,6 +50,15 @@ interface RunData {
   reply: string;
   results?: PlaceResult[];
   error?: string;
+  audio_base64?: string | null;
+  audio_content_type?: string | null;
+}
+
+function base64ToBlob(b64: string, type: string): Blob {
+  const bytes = atob(b64);
+  const arr = new Uint8Array(bytes.length);
+  for (let i = 0; i < bytes.length; i += 1) arr[i] = bytes.charCodeAt(i);
+  return new Blob([arr], { type });
 }
 
 interface ChatMessage {
@@ -97,28 +106,6 @@ export default function AssistantPage() {
     }
   }, []);
 
-  const speak = useCallback(
-    async (text: string) => {
-      if (!text) return;
-      try {
-        setPhase('speaking');
-        const res = await fetch('/api/eden/speak', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text }),
-        });
-        if (!res.ok) return; // voice failed — the on-screen reply still stands
-        const blob = await res.blob();
-        await playAudio(URL.createObjectURL(blob));
-      } catch {
-        // ignore voice errors
-      } finally {
-        setPhase('idle');
-      }
-    },
-    [playAudio],
-  );
-
   const submit = useCallback(
     async (text: string) => {
       const clean = text.trim();
@@ -146,7 +133,11 @@ export default function AssistantPage() {
         const data = json.data as RunData;
         setConversationId(data.conversation_id);
         setMessages((m) => [...m, { role: 'eden', text: data.reply, results: data.results }]);
-        await speak(data.reply);
+        setPhase('idle');
+        if (data.audio_base64) {
+          const blob = base64ToBlob(data.audio_base64, data.audio_content_type ?? 'audio/mpeg');
+          await playAudio(URL.createObjectURL(blob));
+        }
       } catch {
         setError('Could not reach Eden. Check your connection and try again.');
         setPhase('idle');
@@ -154,7 +145,7 @@ export default function AssistantPage() {
         setBusy(false);
       }
     },
-    [busy, conversationId, speak],
+    [busy, conversationId, playAudio],
   );
 
   const toggleListen = useCallback(() => {

@@ -3,10 +3,10 @@
  *
  * POST /api/eden/run  body: { "raw_request": "...", "conversation_id"?: "..." }
  *
- * Runs one conversation turn: Eden interprets the request in the context of the
- * ongoing conversation, then either finds places (driving the full read-only
- * loop) or replies conversationally. Returns the turn result, including the
- * conversation_id to send back on the next turn.
+ * Runs one conversation turn AND generates the spoken audio in the same request,
+ * so the browser makes a single round trip and the server only wakes once per
+ * turn. Returns the turn result plus base64 audio (when voice succeeds); voice is
+ * best-effort — if it fails, the text reply still stands.
  *
  * Requires Supabase + a reasoning provider (OpenAI). Runs on the Node.js runtime.
  */
@@ -15,6 +15,7 @@ import { z } from 'zod';
 import { withRoute, parseJsonBody } from '@/lib/http/handler';
 import { jsonOk } from '@/lib/http/responses';
 import { runConversationTurn } from '@/core/orchestrator';
+import { getSpeechProvider } from '@/lib/speech';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -33,5 +34,20 @@ export const POST = withRoute(async (request, { requestId }) => {
   const body = await parseJsonBody(request, runRequestSchema);
   const rawRequest = (body.raw_request ?? body.input)!;
   const result = await runConversationTurn(rawRequest, body.conversation_id);
-  return jsonOk(result, requestId);
+
+  // Generate speech in the same request (best-effort; voice is optional).
+  let audio_base64: string | null = null;
+  let audio_content_type: string | null = null;
+  if (result.reply) {
+    try {
+      const provider = getSpeechProvider();
+      const buf = await provider.synthesize(result.reply);
+      audio_base64 = Buffer.from(buf).toString('base64');
+      audio_content_type = provider.contentType;
+    } catch {
+      // Voice failed — the on-screen reply is still returned.
+    }
+  }
+
+  return jsonOk({ ...result, audio_base64, audio_content_type }, requestId);
 });
