@@ -23,7 +23,7 @@ import { getReasoningProvider } from '@/lib/ai/registry';
 import { SYSTEM_PRINCIPAL_ID, SYSTEM_TENANT_ID } from '@/lib/config/constants';
 import { getDefaultLocation } from '@/lib/config/env';
 import { memoryApi, type ConversationTurn } from '@/core/memory';
-import { reasoningPlane } from '@/core/reasoning';
+import { reasoningPlane, type BusinessPlan } from '@/core/reasoning';
 import { toolRegistry } from '@/core/tool-registry';
 import { ensureToolsRegistered, PLACES_SEARCH_TOOL } from '@/core/tools';
 import type { PlaceResult } from '@/lib/places';
@@ -46,6 +46,8 @@ export interface TurnResult {
   error?: string;
   /** Present on the audited action path. */
   work_package_id?: string;
+  /** Present when a written plan was generated. */
+  plan?: BusinessPlan;
   note?: string;
 }
 
@@ -78,6 +80,24 @@ function resultsToReply(results: PlaceResult[], location: string, cuisine: strin
   return `I found ${results.length} ${c}options near ${location}. The closest ${names.length > 1 ? 'are' : 'is'} ${list}. Want details on any of them?`;
 }
 
+/** Compact text of a plan, stored in conversation memory so follow-ups have context. */
+function planToMemoryText(p: BusinessPlan): string {
+  const s = p.plan;
+  return [
+    `Plan for ${p.title || 'the idea'}.`,
+    p.concept && `Concept: ${p.concept}`,
+    s.problem && `Problem: ${s.problem}`,
+    s.solution && `Solution: ${s.solution}`,
+    s.target_customer && `Customer: ${s.target_customer}`,
+    s.value_proposition && `Value: ${s.value_proposition}`,
+    s.business_model && `Business model: ${s.business_model}`,
+    s.go_to_market && `Go-to-market: ${s.go_to_market}`,
+    p.branding?.name_ideas?.length ? `Name ideas: ${p.branding.name_ideas.join(', ')}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
 export async function runConversationTurn(
   rawRequest: string,
   conversationId?: string,
@@ -92,6 +112,27 @@ export async function runConversationTurn(
 
   // One combined call: route + (for chat) reply.
   const route = await reasoningPlane.routeTurn(rawRequest, contextText);
+
+  if (route.action === 'generate_plan') {
+    // ── Written plan (thinking deliverable; lightweight, no Work Package) ──
+    let plan: BusinessPlan | null = null;
+    try {
+      plan = await reasoningPlane.generatePlan(rawRequest, contextText);
+    } catch {
+      plan = null;
+    }
+    if (!plan) {
+      const reply = "I wasn't able to put the plan together just then — give it another go in a moment.";
+      await memoryApi.appendTurn(convoId, TENANT, 'assistant', reply);
+      return { conversation_id: convoId, status: 'replied', reply, note: 'Plan generation failed.' };
+    }
+    const title = plan.title || 'your idea';
+    const reply = `Here's a first plan for ${title}. I've laid out the concept, a business plan, and some branding directions below — tell me what to sharpen.`;
+    await memoryApi.appendTurn(convoId, TENANT, 'assistant', planToMemoryText(plan), {
+      data: { plan },
+    });
+    return { conversation_id: convoId, status: 'planned', reply, plan, note: 'Generated a written plan.' };
+  }
 
   if (route.action !== 'find_place') {
     // ── Fast conversational path (no Work Package) ──

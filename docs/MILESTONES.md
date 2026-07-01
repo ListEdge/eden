@@ -215,6 +215,37 @@ planning beyond place search, approvals, Phases 2–5.
 
 ---
 
+## ✅ Milestone 8 — Strategist & written plans (first co-founder step)
+
+The first real step toward Eden as a co-founder: it develops an idea *with* you,
+then produces a proper written plan.
+
+**Delivered:**
+
+- **A strategist streak in conversation**: when you share an idea, objective, or
+  problem, Eden acts like a sharp co-founder — asking focused questions,
+  challenging weak assumptions, and helping sharpen the thinking, rather than
+  just answering.
+- **Plan generation** (`reasoning.generatePlan` + a third `generate_plan` route
+  action): when you ask it to put the plan together, Eden produces a structured,
+  concrete plan from the conversation — a refined concept, a full business plan
+  (problem, solution, customer, value, market, model, go-to-market, competition,
+  risks), ordered next steps, and branding directions (names, positioning, tone,
+  visual direction).
+- **A plan view** in `/assistant`: the plan renders as a clear, sectioned card,
+  with a short spoken summary; the plan text is also kept in memory so you can
+  ask Eden to sharpen any part.
+
+**The behaviour you can see:** say "I've got an idea for a business", talk it
+through as Eden questions and refines it, then "put together the plan" — and you
+get a genuine written plan on screen.
+
+**Deliberately not yet:** saving plans as revisitable projects, generating the
+actual website/branding *assets*, and building or deploying anything — those are
+the next slices. Eden still won't claim to build or ship software.
+
+---
+
 ## Phase 0 — Memory & the spine
 
 Make the source of truth real. Build the full database schema with its invariant

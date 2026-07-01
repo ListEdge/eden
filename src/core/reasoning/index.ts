@@ -157,8 +157,16 @@ const CONVERSE_SYSTEM = [
  */
 const routeSchema = z.object({
   action: z
-    .union([z.literal('find_place'), z.literal('chat'), z.string(), z.null()])
-    .transform((v): 'find_place' | 'chat' => (v === 'find_place' ? 'find_place' : 'chat'))
+    .union([
+      z.literal('find_place'),
+      z.literal('generate_plan'),
+      z.literal('chat'),
+      z.string(),
+      z.null(),
+    ])
+    .transform((v): 'find_place' | 'generate_plan' | 'chat' =>
+      v === 'find_place' ? 'find_place' : v === 'generate_plan' ? 'generate_plan' : 'chat',
+    )
     .default('chat'),
   goal: coercedString,
   reply: coercedString,
@@ -168,7 +176,7 @@ const routeSchema = z.object({
 
 /** Result of routing a turn. */
 export interface TurnRoute {
-  action: 'find_place' | 'chat';
+  action: 'find_place' | 'generate_plan' | 'chat';
   goal: string;
   reply: string;
   cuisine: string | null;
@@ -176,24 +184,114 @@ export interface TurnRoute {
 }
 
 const ROUTER_SYSTEM = [
-  'You are Eden, a warm, thoughtful personal assistant. Decide how to handle the message and respond in ONE step.',
+  'You are Eden, a sharp, warm co-founder and personal assistant. Decide how to handle the message and respond in ONE step.',
   'Return a single JSON object with these keys:',
-  '- "action": "find_place" ONLY if the user wants you to find a specific place to GO TO now',
-  '  (restaurant, café, bar, venue) — e.g. "find an Italian restaurant", "coffee nearby",',
-  '  "what about Thai instead". Asking advice or discussing places in general is "chat".',
+  '- "action": one of "find_place", "generate_plan", or "chat".',
+  '  • "find_place": the user wants you to find a specific place to GO TO now (restaurant, café,',
+  '    bar, venue) — e.g. "find an Italian restaurant", "coffee nearby", "what about Thai instead".',
+  '  • "generate_plan": the user is asking you to PUT TOGETHER / WRITE / CREATE the business plan',
+  '    or strategy document now (e.g. "make the plan", "put it all together", "write up the plan",',
+  '    or agreeing when you offered to). Choose this only when they want the written plan produced.',
+  '  • "chat": everything else, including discussing or developing an idea.',
   '- "goal": a short one-line summary of what the user wants.',
   '- "cuisine": if find_place and a cuisine is mentioned, give it (e.g. "italian"), else null.',
-  '- "location": if find_place, the area/suburb/city to search — from this message or earlier in',
-  '  the conversation — else null. Never invent a location.',
-  '- "reply": if action is "chat", your spoken reply. If "find_place", use "".',
-  'When writing "reply": be warm and natural, but BRIEF — it is spoken aloud, so keep it to',
-  '1–3 short sentences by default. Only go longer when the question genuinely needs it. Use the',
-  'conversation context to resolve references like "that place" or "the first one".',
-  'Be honest about limits: you can find places, but you cannot yet book, call, email, message,',
-  "pay, or access the user's calendar, files, or accounts, and you cannot read live data",
-  '(current weather, live hours or availability). If asked, say so plainly. Do not invent',
-  'real-time facts. General knowledge and reasoning are fine.',
+  '- "location": if find_place, the area/suburb/city to search — from this message or earlier — else null. Never invent one.',
+  '- "reply": if action is "chat", your spoken reply. If "find_place" or "generate_plan", use "".',
+  'How to "chat": you are a genuine thinking partner. When the user shares an idea, an objective,',
+  'or a problem, act like a great co-founder — ask one or two sharp, specific questions, challenge',
+  'weak assumptions, and help sharpen the thinking. Do not dump many questions at once. When it',
+  'feels like the idea has taken enough shape, offer to put together a full written plan.',
+  'Keep spoken replies BRIEF and natural — 1–3 short sentences by default — since they are read aloud.',
+  'Use the conversation context to resolve references like "that place" or "the first one".',
+  'Be honest about limits: you can find places and produce written plans, but you cannot yet book,',
+  "call, email, message, pay, build or deploy software, or access the user's accounts, and you cannot",
+  'read live data (current weather, live hours or availability). If asked, say so plainly. Do not',
+  'invent real-time facts. General knowledge and reasoning are welcome.',
   'Respond with JSON only.',
+].join('\n');
+
+/* ----- Business plan generation ----- */
+
+const planSectionSchema = z
+  .object({
+    problem: coercedString,
+    solution: coercedString,
+    target_customer: coercedString,
+    value_proposition: coercedString,
+    market: coercedString,
+    business_model: coercedString,
+    go_to_market: coercedString,
+    competition: coercedString,
+    risks: coercedString,
+  })
+  .default({
+    problem: '',
+    solution: '',
+    target_customer: '',
+    value_proposition: '',
+    market: '',
+    business_model: '',
+    go_to_market: '',
+    competition: '',
+    risks: '',
+  });
+
+const brandingSchema = z
+  .object({
+    name_ideas: stringList,
+    positioning: coercedString,
+    tone: coercedString,
+    visual_direction: coercedString,
+  })
+  .default({ name_ideas: [], positioning: '', tone: '', visual_direction: '' });
+
+const planSchema = z.object({
+  title: coercedString,
+  concept: coercedString,
+  plan: planSectionSchema,
+  next_steps: stringList,
+  branding: brandingSchema,
+});
+
+/** A structured, written plan for an idea or objective. */
+export interface BusinessPlan {
+  title: string;
+  concept: string;
+  plan: {
+    problem: string;
+    solution: string;
+    target_customer: string;
+    value_proposition: string;
+    market: string;
+    business_model: string;
+    go_to_market: string;
+    competition: string;
+    risks: string;
+  };
+  next_steps: string[];
+  branding: {
+    name_ideas: string[];
+    positioning: string;
+    tone: string;
+    visual_direction: string;
+  };
+}
+
+const PLAN_SYSTEM = [
+  'You are Eden, an experienced co-founder and strategist. Using the conversation as your source',
+  'material, produce a genuine, concrete written plan for the user\'s idea or objective — the kind',
+  'a thoughtful founder would actually use, not vague filler.',
+  'Return a single JSON object with these keys:',
+  '- "title": a clear name for the idea (use the user\'s if given).',
+  '- "concept": 2–4 sentences that sharpen the concept, not just restate it.',
+  '- "plan": an object with string fields: "problem", "solution", "target_customer",',
+  '  "value_proposition", "market", "business_model", "go_to_market", "competition", "risks".',
+  '  Be specific and realistic; where the conversation left something unknown, make a sensible,',
+  '  clearly reasonable assumption rather than hand-waving.',
+  '- "next_steps": an array of 4–7 concrete, ordered actions the user could take next.',
+  '- "branding": an object with "name_ideas" (3–5 distinct names), "positioning" (one line),',
+  '  "tone" (a few words), and "visual_direction" (colours/typography/feel in 1–2 sentences).',
+  'Be honest and useful. Respond with JSON only.',
 ].join('\n');
 
 const UNDERSTAND_SYSTEM = [
@@ -222,6 +320,8 @@ export interface ReasoningPlane {
   converse(contextText: string, userMessage: string): Promise<string>;
   /** One-call router + responder for the hot path: decide action vs chat, and reply if chat. */
   routeTurn(rawRequest: string, contextText?: string): Promise<TurnRoute>;
+  /** Produce a structured written plan for an idea, using the conversation as source material. */
+  generatePlan(rawRequest: string, contextText?: string): Promise<BusinessPlan>;
   /** Stage 4: decompose into one or more Work Package drafts. Throws on a cyclic DAG. */
   plan(u: Understanding): Promise<WorkPackageDraft[]>;
   /**
@@ -355,6 +455,26 @@ export const reasoningPlane: ReasoningPlane = {
         location: null,
       };
     }
+  },
+
+  async generatePlan(rawRequest: string, contextText?: string): Promise<BusinessPlan> {
+    const provider = getReasoningProvider();
+    const messages: Message[] = [{ role: 'system', content: PLAN_SYSTEM }];
+    if (contextText && contextText.trim()) {
+      messages.push({
+        role: 'system',
+        content: `Conversation so far (use it as the source material for the plan):\n${contextText}`,
+      });
+    }
+    messages.push({ role: 'user', content: rawRequest });
+    const { data } = await provider.completeStructured({
+      schema: planSchema,
+      schemaName: 'BusinessPlan',
+      temperature: 0.5,
+      maxOutputTokens: 1800,
+      messages,
+    });
+    return data;
   },
 
   plan() {
