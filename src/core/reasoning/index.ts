@@ -15,6 +15,7 @@ import { z } from 'zod';
 import { NotImplementedError } from '@/lib/errors';
 import { getReasoningProvider } from '@/lib/ai/registry';
 import type { Message } from '@/lib/ai/types';
+import type { WebSearchResult } from '@/lib/search';
 import type {
   ActionDraft,
   Criterion,
@@ -139,13 +140,13 @@ const CONVERSE_SYSTEM = [
   'draft text, and help the person think. Use the conversation context to stay on thread and',
   'resolve references like "that place" or "the first one".',
   'Be honest about your limits:',
-  '- You CAN find places to go (restaurants, cafés, bars) when asked — that happens automatically,',
-  '  so you never need to explain how; just answer naturally.',
+  '- You CAN find places to go, search the web for current information, and check the weather when',
+  '  asked — that happens automatically, so you never need to explain how; just answer naturally.',
   '- You CANNOT yet take other real-world actions: booking, calling, emailing or messaging,',
   '  making payments, or accessing the person\'s calendar, files, or accounts. If asked to do one,',
   '  say plainly that you can\'t do that yet, and offer what you can do instead.',
-  '- Do not state specific real-time facts you cannot actually know (live prices, opening hours,',
-  "  today's weather, current availability). General knowledge and reasoning are welcome.",
+  '- Prefer looking things up over guessing at specific current facts. General knowledge and',
+  '  reasoning are welcome.',
   'Keep replies focused — usually a few sentences. For genuinely complex questions you may go',
   'longer, but stay clear and avoid rambling. Be encouraging and practical.',
 ].join('\n');
@@ -155,59 +156,88 @@ const CONVERSE_SYSTEM = [
  * turn and, for plain conversation, writes the reply — replacing the separate
  * understand + classify + converse calls on the hot path, for speed.
  */
+/** The ways Eden can handle a single turn. */
+export type TurnAction = 'find_place' | 'generate_plan' | 'web_search' | 'get_weather' | 'chat';
+
 const routeSchema = z.object({
   action: z
     .union([
       z.literal('find_place'),
       z.literal('generate_plan'),
+      z.literal('web_search'),
+      z.literal('get_weather'),
       z.literal('chat'),
       z.string(),
       z.null(),
     ])
-    .transform((v): 'find_place' | 'generate_plan' | 'chat' =>
-      v === 'find_place' ? 'find_place' : v === 'generate_plan' ? 'generate_plan' : 'chat',
-    )
+    .transform((v): TurnAction => {
+      if (
+        v === 'find_place' ||
+        v === 'generate_plan' ||
+        v === 'web_search' ||
+        v === 'get_weather'
+      ) {
+        return v;
+      }
+      return 'chat';
+    })
     .default('chat'),
   goal: coercedString,
   reply: coercedString,
   cuisine: coercedNullableString,
   location: coercedNullableString,
+  query: coercedString,
 });
 
 /** Result of routing a turn. */
 export interface TurnRoute {
-  action: 'find_place' | 'generate_plan' | 'chat';
+  action: TurnAction;
   goal: string;
   reply: string;
   cuisine: string | null;
   location: string | null;
+  query: string;
 }
 
 const ROUTER_SYSTEM = [
   'You are Eden, a sharp, warm co-founder and personal assistant. Decide how to handle the message and respond in ONE step.',
   'Return a single JSON object with these keys:',
-  '- "action": one of "find_place", "generate_plan", or "chat".',
+  '- "action": one of "find_place", "generate_plan", "web_search", "get_weather", or "chat".',
   '  • "find_place": the user wants you to find a specific place to GO TO now (restaurant, café,',
   '    bar, venue) — e.g. "find an Italian restaurant", "coffee nearby", "what about Thai instead".',
   '  • "generate_plan": the user is asking you to PUT TOGETHER / WRITE / CREATE the business plan',
   '    or strategy document now (e.g. "make the plan", "put it all together", "write up the plan",',
   '    or agreeing when you offered to). Choose this only when they want the written plan produced.',
+  '  • "web_search": the user wants current, factual, or up-to-date information from the web —',
+  '    news, prices, statistics, facts, research, "look it up", "search for…", "what\'s the latest on…",',
+  '    or anything you would not reliably know from memory. Put the search query in "query".',
+  '  • "get_weather": the user is asking about the weather. Put the place in "location" (from this',
+  '    message or earlier in the conversation); leave it null to use their default area.',
   '  • "chat": everything else, including discussing or developing an idea.',
   '- "goal": a short one-line summary of what the user wants.',
   '- "cuisine": if find_place and a cuisine is mentioned, give it (e.g. "italian"), else null.',
-  '- "location": if find_place, the area/suburb/city to search — from this message or earlier — else null. Never invent one.',
-  '- "reply": if action is "chat", your spoken reply. If "find_place" or "generate_plan", use "".',
+  '- "location": if find_place or get_weather, the area/suburb/city — from this message or earlier — else null. Never invent one.',
+  '- "query": if web_search, the search query to run (rewrite it into a clear, standalone query). Else "".',
+  '- "reply": if action is "chat", your spoken reply. For any other action, use "".',
   'How to "chat": you are a genuine thinking partner. When the user shares an idea, an objective,',
   'or a problem, act like a great co-founder — ask one or two sharp, specific questions, challenge',
   'weak assumptions, and help sharpen the thinking. Do not dump many questions at once. When it',
   'feels like the idea has taken enough shape, offer to put together a full written plan.',
   'Keep spoken replies BRIEF and natural — 1–3 short sentences by default — since they are read aloud.',
   'Use the conversation context to resolve references like "that place" or "the first one".',
-  'Be honest about limits: you can find places and produce written plans, but you cannot yet book,',
-  "call, email, message, pay, build or deploy software, or access the user's accounts, and you cannot",
-  'read live data (current weather, live hours or availability). If asked, say so plainly. Do not',
-  'invent real-time facts. General knowledge and reasoning are welcome.',
-  'Respond with JSON only.',
+  'Be honest about limits: you CAN find places, produce written plans, search the web for current',
+  "information, and check the weather. You cannot yet book, call, email, message, pay, build or deploy",
+  "software, or access the user's private accounts, calendar, or files. If asked for one of those, say",
+  'so plainly and offer what you can do instead. When you need current facts, prefer web_search over',
+  'guessing. Respond with JSON only.',
+].join('\n');
+
+const SEARCH_ANSWER_SYSTEM = [
+  'You are Eden. Answer the user\'s question using ONLY the search results provided below.',
+  'Be accurate and concise — 1–3 short sentences, natural to say aloud. If the results do not',
+  'clearly answer the question, say what you did find and note that you couldn\'t confirm the rest.',
+  'Do not invent facts beyond the results. Do not print URLs or say "according to source 1"; just',
+  'answer plainly. The user can see the sources separately.',
 ].join('\n');
 
 /* ----- Business plan generation ----- */
@@ -320,6 +350,13 @@ export interface ReasoningPlane {
   converse(contextText: string, userMessage: string): Promise<string>;
   /** One-call router + responder for the hot path: decide action vs chat, and reply if chat. */
   routeTurn(rawRequest: string, contextText?: string): Promise<TurnRoute>;
+  /** Compose a brief, grounded spoken reply from web-search results. */
+  summarizeSearch(
+    query: string,
+    answer: string | null,
+    results: WebSearchResult[],
+    contextText?: string,
+  ): Promise<string>;
   /** Produce a structured written plan for an idea, using the conversation as source material. */
   generatePlan(rawRequest: string, contextText?: string): Promise<BusinessPlan>;
   /** Stage 4: decompose into one or more Work Package drafts. Throws on a cyclic DAG. */
@@ -443,6 +480,7 @@ export const reasoningPlane: ReasoningPlane = {
         reply: data.reply,
         cuisine: data.cuisine,
         location: data.location,
+        query: data.query,
       };
     } catch {
       // Fallback if the model call fails: route by keyword, generic reply for chat.
@@ -453,8 +491,33 @@ export const reasoningPlane: ReasoningPlane = {
         reply: isPlace ? '' : "I'm having trouble responding right now — could you try that again?",
         cuisine: scanCuisine(rawRequest),
         location: null,
+        query: '',
       };
     }
+  },
+
+  async summarizeSearch(
+    query: string,
+    answer: string | null,
+    results: WebSearchResult[],
+    contextText?: string,
+  ): Promise<string> {
+    const provider = getReasoningProvider();
+    const sources = results
+      .slice(0, 6)
+      .map((r, i) => `[${i + 1}] ${r.title}\n${r.snippet}`)
+      .join('\n\n');
+    const messages: Message[] = [{ role: 'system', content: SEARCH_ANSWER_SYSTEM }];
+    if (contextText && contextText.trim()) {
+      messages.push({ role: 'system', content: `Conversation so far:\n${contextText}` });
+    }
+    const draft = answer ? `A draft answer to consider: ${answer}\n\n` : '';
+    messages.push({
+      role: 'user',
+      content: `Question: ${query}\n\n${draft}Search results:\n${sources || '(no results)'}`,
+    });
+    const { text } = await provider.complete({ messages, temperature: 0.3, maxOutputTokens: 400 });
+    return text.trim();
   },
 
   async generatePlan(rawRequest: string, contextText?: string): Promise<BusinessPlan> {

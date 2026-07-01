@@ -63,6 +63,34 @@ export interface SpecificationUpdate {
   spec: WorkPackageSpec;
 }
 
+/** A persistent project workspace (list view — no plan payload). */
+export interface Project {
+  id: string;
+  title: string;
+  summary: string;
+  status: string;
+  conversation_id: string | null;
+  has_plan: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A project with its saved plan payload (detail view). */
+export interface ProjectDetail extends Project {
+  plan: unknown | null;
+}
+
+/** Input to create a project. */
+export interface NewProject {
+  tenantId: string;
+  principalId: string;
+  title: string;
+  summary?: string;
+  status?: string;
+  conversationId?: string | null;
+  plan?: unknown | null;
+}
+
 export interface MemoryAPI {
   /** Capture raw intent as an immutable request record (Stage 1 INGEST). */
   createRequest(input: NewRequest): Promise<RequestRecord>;
@@ -95,6 +123,13 @@ export interface MemoryAPI {
   ): Promise<void>;
   /** Load the most recent turns of a conversation, oldest-first. */
   getRecentTurns(conversationId: string, limit?: number): Promise<ConversationTurn[]>;
+
+  /** Create a persistent project workspace. */
+  createProject(input: NewProject): Promise<Project>;
+  /** List projects for a tenant, most-recently-updated first. */
+  listProjects(tenantId: string, limit?: number): Promise<Project[]>;
+  /** Load a single project (including its saved plan), or null if not found. */
+  getProject(id: string): Promise<ProjectDetail | null>;
 }
 
 /**
@@ -344,5 +379,80 @@ export const memoryApi: MemoryAPI = {
         created_at: r.created_at as string,
       }))
       .reverse();
+  },
+
+  async createProject(input: NewProject): Promise<Project> {
+    const db = adminDb();
+    const now = new Date().toISOString();
+    const { data, error } = await db
+      .from('projects')
+      .insert({
+        tenant_id: input.tenantId,
+        principal_id: input.principalId,
+        conversation_id: input.conversationId ?? null,
+        title: input.title,
+        summary: input.summary ?? '',
+        status: input.status ?? 'active',
+        plan: input.plan ?? null,
+        created_at: now,
+        updated_at: now,
+      })
+      .select('id, title, summary, status, conversation_id, plan, created_at, updated_at')
+      .single();
+    if (error || !data) throw dbError('createProject', error);
+    return {
+      id: data.id as string,
+      title: data.title as string,
+      summary: (data.summary as string) ?? '',
+      status: data.status as string,
+      conversation_id: (data.conversation_id as string | null) ?? null,
+      has_plan: data.plan != null,
+      created_at: data.created_at as string,
+      updated_at: data.updated_at as string,
+    };
+  },
+
+  async listProjects(tenantId: string, limit = 50): Promise<Project[]> {
+    const db = adminDb();
+    const { data, error } = await db
+      .from('projects')
+      .select('id, title, summary, status, conversation_id, plan, created_at, updated_at')
+      .eq('tenant_id', tenantId)
+      .order('updated_at', { ascending: false })
+      .limit(limit);
+    if (error) throw dbError('listProjects', error);
+    const rows = Array.isArray(data) ? data : [];
+    return rows.map((r) => ({
+      id: r.id as string,
+      title: r.title as string,
+      summary: (r.summary as string) ?? '',
+      status: r.status as string,
+      conversation_id: (r.conversation_id as string | null) ?? null,
+      has_plan: r.plan != null,
+      created_at: r.created_at as string,
+      updated_at: r.updated_at as string,
+    }));
+  },
+
+  async getProject(id: string): Promise<ProjectDetail | null> {
+    const db = adminDb();
+    const { data, error } = await db
+      .from('projects')
+      .select('id, title, summary, status, conversation_id, plan, created_at, updated_at')
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw dbError('getProject', error);
+    if (!data) return null;
+    return {
+      id: data.id as string,
+      title: data.title as string,
+      summary: (data.summary as string) ?? '',
+      status: data.status as string,
+      conversation_id: (data.conversation_id as string | null) ?? null,
+      has_plan: data.plan != null,
+      plan: (data.plan as unknown) ?? null,
+      created_at: data.created_at as string,
+      updated_at: data.updated_at as string,
+    };
   },
 };

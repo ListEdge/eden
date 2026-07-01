@@ -48,6 +48,21 @@ interface PlaceResult {
   distanceMeters: number | null;
   website: string | null;
 }
+interface WebSearchResult {
+  title: string;
+  url: string;
+  snippet: string;
+  score: number | null;
+}
+interface WeatherData {
+  locationLabel: string;
+  temperatureC: number | null;
+  apparentC: number | null;
+  humidityPct: number | null;
+  windKph: number | null;
+  isDay: boolean;
+  description: string;
+}
 interface PlanData {
   title: string;
   concept: string;
@@ -75,6 +90,8 @@ interface RunData {
   status: string;
   reply: string;
   results?: PlaceResult[];
+  web?: { query: string; answer: string | null; results: WebSearchResult[] };
+  weather?: WeatherData;
   plan?: PlanData;
   error?: string;
   audio_base64?: string | null;
@@ -89,18 +106,25 @@ interface ChatMessage {
 }
 
 type FloatContent =
-  | { kind: 'project'; name: string; sub: string }
+  | { kind: 'project'; project: ProjectItem }
   | { kind: 'plan'; plan: PlanData }
-  | { kind: 'results'; title: string; results: PlaceResult[] };
+  | { kind: 'results'; title: string; results: PlaceResult[] }
+  | { kind: 'web'; query: string; answer: string | null; results: WebSearchResult[] }
+  | { kind: 'weather'; weather: WeatherData };
 
 type CoreMode = 'idle' | 'listening' | 'thinking' | 'working';
 type V3 = [number, number, number];
 
-const PROJECTS: { name: string; sub: string }[] = [
-  { name: 'ListEdge', sub: 'Conjunctional sales network' },
-  { name: 'Website Studio', sub: 'Client sites' },
-  { name: 'Klyne Real Estate', sub: 'CRM + listings' },
-];
+interface ProjectItem {
+  id: string;
+  title: string;
+  summary: string;
+  status: string;
+  conversation_id: string | null;
+  has_plan: boolean;
+  created_at: string;
+  updated_at: string;
+}
 
 function base64ToBlob(b64: string, type: string): Blob {
   const bytes = atob(b64);
@@ -126,6 +150,14 @@ function wave(base: number, freq: number, phase: number): number[] {
   return Array.from(Array(24).keys()).map((i) => Math.round(base + Math.sin(i * freq + phase) * 8));
 }
 
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return url;
+  }
+}
+
 export default function AssistantPage() {
   const recognitionSupported = useMemo(() => getRecognitionCtor() !== null, []);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
@@ -145,6 +177,9 @@ export default function AssistantPage() {
   const [error, setError] = useState<string | null>(null);
   const [pendingAudioUrl, setPendingAudioUrl] = useState<string | null>(null);
   const [floatContent, setFloatContent] = useState<FloatContent | null>(null);
+  const [projects, setProjects] = useState<ProjectItem[]>([]);
+  const [projectsLoaded, setProjectsLoaded] = useState(false);
+  const [activeProject, setActiveProject] = useState<{ id: string; title: string } | null>(null);
   const [clock, setClock] = useState('');
   const [metrics, setMetrics] = useState<number[][]>([
     wave(42, 0.7, 0),
@@ -454,6 +489,15 @@ export default function AssistantPage() {
         ]);
         if (data.plan) {
           setFloatContent({ kind: 'plan', plan: data.plan });
+        } else if (data.web) {
+          setFloatContent({
+            kind: 'web',
+            query: data.web.query,
+            answer: data.web.answer,
+            results: data.web.results,
+          });
+        } else if (data.weather) {
+          setFloatContent({ kind: 'weather', weather: data.weather });
         } else if (data.results && data.results.length > 0) {
           setFloatContent({ kind: 'results', title: 'Results', results: data.results });
         }
@@ -519,6 +563,7 @@ export default function AssistantPage() {
     setError(null);
     setPendingAudioUrl(null);
     setFloatContent(null);
+    setActiveProject(null);
   }, []);
 
   const wake = useCallback(() => {
@@ -531,6 +576,110 @@ export default function AssistantPage() {
     setFloatContent(null);
     setAwake(false);
   }, []);
+
+  const refreshProjects = useCallback(async () => {
+    try {
+      const res = await fetch('/api/eden/projects');
+      const json = await res.json();
+      if (json.ok && Array.isArray(json.data.projects)) {
+        setProjects(json.data.projects as ProjectItem[]);
+      }
+    } catch {
+      // Panel simply shows empty if projects can't be loaded.
+    } finally {
+      setProjectsLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    const id = window.setTimeout(() => {
+      void refreshProjects();
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, [refreshProjects]);
+
+  const newProject = useCallback(async () => {
+    if (!awake) wake();
+    try {
+      const res = await fetch('/api/eden/projects', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: 'New project' }),
+      });
+      const json = await res.json();
+      if (json.ok) {
+        const p = json.data.project as ProjectItem;
+        setActiveProject({ id: p.id, title: p.title });
+        setConversationId(p.conversation_id);
+        setMessages([]);
+        setFloatContent(null);
+        void refreshProjects();
+        window.setTimeout(() => inputRef.current?.focus(), 200);
+      } else {
+        setError('Could not create the project. Try again in a moment.');
+      }
+    } catch {
+      setError('Could not create the project. Try again in a moment.');
+    }
+  }, [awake, refreshProjects, wake]);
+
+  const resumeProject = useCallback(async (p: ProjectItem) => {
+    setFloatContent(null);
+    try {
+      const res = await fetch(`/api/eden/projects?id=${encodeURIComponent(p.id)}`);
+      const json = await res.json();
+      if (json.ok && json.data.project) {
+        const detail = json.data.project as ProjectItem;
+        const turns = (json.data.turns ?? []) as { role: 'user' | 'eden'; text: string }[];
+        setActiveProject({ id: detail.id, title: detail.title });
+        setConversationId(detail.conversation_id);
+        setMessages(turns.map((t) => ({ role: t.role, text: t.text })));
+      }
+    } catch {
+      setError('Could not open that project.');
+    }
+  }, []);
+
+  const viewProjectPlan = useCallback(async (p: ProjectItem) => {
+    try {
+      const res = await fetch(`/api/eden/projects?id=${encodeURIComponent(p.id)}`);
+      const json = await res.json();
+      if (json.ok && json.data.project && json.data.project.plan) {
+        setFloatContent({ kind: 'plan', plan: json.data.project.plan as PlanData });
+      }
+    } catch {
+      setError('Could not load the plan.');
+    }
+  }, []);
+
+  const saveAsProject = useCallback(
+    async (plan: PlanData) => {
+      try {
+        const res = await fetch('/api/eden/projects', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: plan.title,
+            summary: plan.concept,
+            plan,
+            conversation_id: conversationId ?? undefined,
+          }),
+        });
+        const json = await res.json();
+        if (json.ok) {
+          const p = json.data.project as ProjectItem;
+          setActiveProject({ id: p.id, title: p.title });
+          setFloatContent(null);
+          void refreshProjects();
+        } else {
+          setError('Could not save the project.');
+        }
+      } catch {
+        setError('Could not save the project.');
+      }
+    },
+    [conversationId, refreshProjects],
+  );
 
   const taskLabel = busy
     ? 'Processing your request'
@@ -584,9 +733,15 @@ export default function AssistantPage() {
             <i />
             <span>{mode}</span>
           </div>
-          {messages.length > 0 ? (
+          {activeProject ? (
+            <div className="projchip" title={activeProject.title}>
+              <i />
+              {activeProject.title}
+            </div>
+          ) : null}
+          {messages.length > 0 || activeProject ? (
             <button type="button" className="newchat" onClick={newConversation}>
-              New chat
+              {activeProject ? 'Exit project' : 'New chat'}
             </button>
           ) : null}
         </div>
@@ -651,28 +806,30 @@ export default function AssistantPage() {
 
             <div className="panel">
               <div className="p-h">Active Projects</div>
-              <div className="p-body">
-                {PROJECTS.map((p) => (
-                  <div
-                    key={p.name}
-                    className="proj"
-                    onClick={() => setFloatContent({ kind: 'project', name: p.name, sub: p.sub })}
-                  >
-                    <span className="nm">
-                      <span className="d" />
-                      {p.name}
-                    </span>
-                    <span className="badge">Active</span>
-                  </div>
-                ))}
-                <button
-                  type="button"
-                  className="newp"
-                  onClick={() => {
-                    if (!awake) wake();
-                    inputRef.current?.focus();
-                  }}
-                >
+              <div className="p-body pcol">
+                <div className="projscroll">
+                  {projectsLoaded && projects.length === 0 ? (
+                    <p className="empty">
+                      No projects yet. Ask Eden to plan something and save it, or start one below —
+                      it&apos;ll remember it next time.
+                    </p>
+                  ) : (
+                    projects.map((p) => (
+                      <div
+                        key={p.id}
+                        className="proj"
+                        onClick={() => setFloatContent({ kind: 'project', project: p })}
+                      >
+                        <span className="nm">
+                          <span className="d" />
+                          {p.title}
+                        </span>
+                        <span className="badge">{p.status === 'archived' ? 'Archived' : 'Active'}</span>
+                      </div>
+                    ))
+                  )}
+                </div>
+                <button type="button" className="newp" onClick={() => void newProject()}>
                   + New Project
                 </button>
               </div>
@@ -747,6 +904,9 @@ export default function AssistantPage() {
                   <button type="button" onClick={() => void submit('Find good restaurants near me')}>
                     <span className="ic">◈</span>Restaurants near me
                   </button>
+                  <button type="button" onClick={() => void submit("What's the weather right now?")}>
+                    <span className="ic">☀</span>Weather now
+                  </button>
                   <button
                     type="button"
                     onClick={toggleListen}
@@ -772,6 +932,9 @@ export default function AssistantPage() {
                 setFloatContent(null);
                 inputRef.current?.focus();
               }}
+              onProjectResume={resumeProject}
+              onProjectViewPlan={viewProjectPlan}
+              onSavePlan={saveAsProject}
             />
           ) : null}
         </div>
@@ -881,12 +1044,25 @@ function FloatBody({
   content,
   onClose,
   onFocusInput,
+  onProjectResume,
+  onProjectViewPlan,
+  onSavePlan,
 }: {
   content: FloatContent;
   onClose: () => void;
   onFocusInput: () => void;
+  onProjectResume?: (p: ProjectItem) => void;
+  onProjectViewPlan?: (p: ProjectItem) => void;
+  onSavePlan?: (plan: PlanData) => void;
 }) {
   if (content.kind === 'project') {
+    const pr = content.project;
+    const created = new Date(pr.created_at).toLocaleDateString('en-GB', {
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric',
+    });
+    const statusLabel = pr.status === 'archived' ? 'Archived' : 'Active';
     return (
       <>
         <div className="fh">
@@ -895,36 +1071,41 @@ function FloatBody({
             ✕
           </button>
         </div>
-        <h2>{content.name}</h2>
-        <div className="sub">{content.sub} · Active</div>
+        <h2>{pr.title}</h2>
+        <div className="sub">
+          {pr.summary ? `${pr.summary} · ` : ''}
+          {statusLabel}
+        </div>
         <div className="fstats">
           <div className="fstat">
             <div className="k">Status</div>
-            <div className="val">Active</div>
+            <div className="val">{statusLabel}</div>
           </div>
           <div className="fstat">
-            <div className="k">Stage</div>
-            <div className="val">Live</div>
+            <div className="k">Plan</div>
+            <div className="val">{pr.has_plan ? 'Yes' : '—'}</div>
           </div>
           <div className="fstat">
-            <div className="k">Health</div>
-            <div className="val">Good</div>
+            <div className="k">Thread</div>
+            <div className="val">{pr.conversation_id ? 'On' : '—'}</div>
           </div>
         </div>
         <div className="frow">
-          <span className="k">Workspace</span>
-          <span className="v">Coming soon</span>
+          <span className="k">Created</span>
+          <span className="v">{created}</span>
         </div>
         <div className="frow">
-          <span className="k">Linked memory</span>
+          <span className="k">Memory</span>
           <span className="v">Enabled</span>
         </div>
         <div className="factions">
-          <button type="button" onClick={onClose}>
-            Close
-          </button>
-          <button type="button" className="solid" onClick={onFocusInput}>
-            Ask Eden about this
+          {pr.has_plan && onProjectViewPlan ? (
+            <button type="button" onClick={() => onProjectViewPlan(pr)}>
+              View plan
+            </button>
+          ) : null}
+          <button type="button" className="solid" onClick={() => onProjectResume?.(pr)}>
+            Resume
           </button>
         </div>
       </>
@@ -959,6 +1140,86 @@ function FloatBody({
               ) : null}
             </div>
           ))}
+        </div>
+        <div className="factions">
+          <button type="button" className="solid" onClick={onClose}>
+            Done
+          </button>
+        </div>
+      </>
+    );
+  }
+
+  if (content.kind === 'web') {
+    return (
+      <>
+        <div className="fh">
+          <div className="cap">Web</div>
+          <button type="button" className="fx" onClick={onClose} aria-label="Close">
+            ✕
+          </button>
+        </div>
+        <h2>Search</h2>
+        <div className="sub">{content.query}</div>
+        {content.answer ? <p className="plan-lead">{content.answer}</p> : null}
+        <div className="placelist">
+          {content.results.map((r, i) => (
+            <div className="placeitem" key={`${r.url}-${i}`}>
+              <div className="pn">
+                <span className="pname">{r.title}</span>
+              </div>
+              {r.snippet ? (
+                <div className="paddr">
+                  {r.snippet.slice(0, 160)}
+                  {r.snippet.length > 160 ? '…' : ''}
+                </div>
+              ) : null}
+              <a href={r.url} target="_blank" rel="noopener noreferrer">
+                {hostOf(r.url)} →
+              </a>
+            </div>
+          ))}
+        </div>
+        <div className="factions">
+          <button type="button" className="solid" onClick={onClose}>
+            Done
+          </button>
+        </div>
+      </>
+    );
+  }
+
+  if (content.kind === 'weather') {
+    const w = content.weather;
+    return (
+      <>
+        <div className="fh">
+          <div className="cap">Weather</div>
+          <button type="button" className="fx" onClick={onClose} aria-label="Close">
+            ✕
+          </button>
+        </div>
+        <h2>{w.locationLabel}</h2>
+        <div className="sub">
+          {w.description}
+          {w.isDay ? '' : ' · night'}
+        </div>
+        <div className="wcard">
+          <div className="wtemp">{w.temperatureC !== null ? `${Math.round(w.temperatureC)}°` : '—'}</div>
+          <div className="wgrid">
+            <div className="wcell">
+              <span className="k">Feels like</span>
+              <span className="v">{w.apparentC !== null ? `${Math.round(w.apparentC)}°` : '—'}</span>
+            </div>
+            <div className="wcell">
+              <span className="k">Wind</span>
+              <span className="v">{w.windKph !== null ? `${Math.round(w.windKph)} km/h` : '—'}</span>
+            </div>
+            <div className="wcell">
+              <span className="k">Humidity</span>
+              <span className="v">{w.humidityPct !== null ? `${Math.round(w.humidityPct)}%` : '—'}</span>
+            </div>
+          </div>
         </div>
         <div className="factions">
           <button type="button" className="solid" onClick={onClose}>
@@ -1013,9 +1274,14 @@ function FloatBody({
         <button type="button" onClick={onClose}>
           Close
         </button>
-        <button type="button" className="solid" onClick={onFocusInput}>
-          Refine with Eden
+        <button type="button" onClick={onFocusInput}>
+          Refine
         </button>
+        {onSavePlan ? (
+          <button type="button" className="solid" onClick={() => onSavePlan(p)}>
+            Save as project
+          </button>
+        ) : null}
       </div>
     </>
   );

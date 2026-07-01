@@ -25,8 +25,10 @@ import { getDefaultLocation } from '@/lib/config/env';
 import { memoryApi, type ConversationTurn } from '@/core/memory';
 import { reasoningPlane, type BusinessPlan } from '@/core/reasoning';
 import { toolRegistry } from '@/core/tool-registry';
-import { ensureToolsRegistered, PLACES_SEARCH_TOOL } from '@/core/tools';
+import { ensureToolsRegistered, PLACES_SEARCH_TOOL, WEB_SEARCH_TOOL, WEATHER_TOOL } from '@/core/tools';
 import type { PlaceResult } from '@/lib/places';
+import type { WebSearchResult } from '@/lib/search';
+import type { WeatherResult } from '@/lib/weather';
 import type {
   WorkPackageIntent,
   WorkPackageSpec,
@@ -42,6 +44,10 @@ export interface TurnResult {
   reply: string;
   /** Present when a place-search ran. */
   results?: PlaceResult[];
+  /** Present when a web search ran. */
+  web?: { query: string; answer: string | null; results: WebSearchResult[] };
+  /** Present when a weather lookup ran. */
+  weather?: WeatherResult;
   /** Present when the action path ended in FAILED. */
   error?: string;
   /** Present on the audited action path. */
@@ -98,6 +104,23 @@ function planToMemoryText(p: BusinessPlan): string {
     .join('\n');
 }
 
+/** Compact, reference-friendly memory of a web search. */
+function searchToMemory(query: string, reply: string, results: WebSearchResult[]): string {
+  const top = results
+    .slice(0, 5)
+    .map((r, i) => `${i + 1}. ${r.title} — ${r.url}`)
+    .join('\n');
+  return `Web search for "${query}".\nAnswer: ${reply}${top ? `\nSources:\n${top}` : ''}`;
+}
+
+/** A short spoken summary of current weather. */
+function weatherToReply(w: WeatherResult): string {
+  const temp = w.temperatureC !== null ? `${Math.round(w.temperatureC)}°C` : 'an unknown temperature';
+  const feels = w.apparentC !== null ? `, feels like ${Math.round(w.apparentC)}°` : '';
+  const wind = w.windKph !== null ? `, wind ${Math.round(w.windKph)} km/h` : '';
+  return `It's ${temp} and ${w.description.toLowerCase()} in ${w.locationLabel}${feels}${wind}.`;
+}
+
 export async function runConversationTurn(
   rawRequest: string,
   conversationId?: string,
@@ -132,6 +155,82 @@ export async function runConversationTurn(
       data: { plan },
     });
     return { conversation_id: convoId, status: 'planned', reply, plan, note: 'Generated a written plan.' };
+  }
+
+  if (route.action === 'web_search') {
+    // ── Web search (read-only tool; lightweight, no Work Package) ──
+    ensureToolsRegistered();
+    const query = route.query || route.goal || rawRequest;
+    const tool = toolRegistry.get(WEB_SEARCH_TOOL);
+    const toolResult = await tool.run({ query, limit: 6 }, `${convoId}:${WEB_SEARCH_TOOL}`);
+    if (!toolResult.ok) {
+      const reply = 'I tried to search the web, but the lookup failed just then. Try again in a moment.';
+      await memoryApi.appendTurn(convoId, TENANT, 'assistant', reply);
+      return {
+        conversation_id: convoId,
+        status: 'replied',
+        reply,
+        note: toolResult.error?.message ?? 'Web search failed.',
+      };
+    }
+    const out = (toolResult.output ?? {}) as { answer?: string | null; results?: WebSearchResult[] };
+    const results = out.results ?? [];
+    const answer = out.answer ?? null;
+    let reply: string;
+    try {
+      reply = await reasoningPlane.summarizeSearch(query, answer, results, contextText);
+    } catch {
+      reply = answer ?? (results.length ? `Here's what I found on "${query}".` : `I couldn't find much on "${query}".`);
+    }
+    await memoryApi.appendTurn(convoId, TENANT, 'assistant', searchToMemory(query, reply, results), {
+      data: { web: { query, answer, results } },
+    });
+    return {
+      conversation_id: convoId,
+      status: 'searched',
+      reply,
+      web: { query, answer, results },
+      note: `Searched the web for "${query}".`,
+    };
+  }
+
+  if (route.action === 'get_weather') {
+    // ── Weather (read-only tool; lightweight, no Work Package) ──
+    ensureToolsRegistered();
+    const location = route.location ?? getDefaultLocation();
+    if (!location) {
+      const reply = 'Which place should I check the weather for?';
+      await memoryApi.appendTurn(convoId, TENANT, 'assistant', reply);
+      return { conversation_id: convoId, status: 'replied', reply, note: 'Weather needs a location.' };
+    }
+    const tool = toolRegistry.get(WEATHER_TOOL);
+    const toolResult = await tool.run({ location }, `${convoId}:${WEATHER_TOOL}`);
+    if (!toolResult.ok) {
+      const reply = `I couldn't get the weather for ${location} just then. Try again in a moment.`;
+      await memoryApi.appendTurn(convoId, TENANT, 'assistant', reply);
+      return {
+        conversation_id: convoId,
+        status: 'replied',
+        reply,
+        note: toolResult.error?.message ?? 'Weather lookup failed.',
+      };
+    }
+    const out = (toolResult.output ?? {}) as { weather?: WeatherResult };
+    const weather = out.weather;
+    if (!weather) {
+      const reply = `I couldn't read the weather for ${location} just then.`;
+      await memoryApi.appendTurn(convoId, TENANT, 'assistant', reply);
+      return { conversation_id: convoId, status: 'replied', reply };
+    }
+    const reply = weatherToReply(weather);
+    await memoryApi.appendTurn(convoId, TENANT, 'assistant', reply, { data: { weather } });
+    return {
+      conversation_id: convoId,
+      status: 'weather',
+      reply,
+      weather,
+      note: `Fetched weather for ${weather.locationLabel}.`,
+    };
   }
 
   if (route.action !== 'find_place') {

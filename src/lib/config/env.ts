@@ -36,6 +36,10 @@ const envSchema = z.object({
   // Optional fallback location used when a request names no place (e.g. "Christchurch, New Zealand").
   EDEN_DEFAULT_LOCATION: z.string().min(1).optional(),
 
+  // Web search provider (Tavily by default) — see lib/search. Server-only key.
+  TAVILY_API_KEY: z.string().min(1).optional(), // server-only
+  EDEN_SEARCH_PROVIDER: z.string().min(1).optional(),
+
   // Speech (voice output) provider — see lib/speech. OpenAI (default) and ElevenLabs.
   ELEVENLABS_API_KEY: z.string().min(1).optional(), // server-only
   ELEVENLABS_VOICE_ID: z.string().min(1).optional(),
@@ -146,6 +150,25 @@ export function getPlacesProviderId(): string {
   return env().EDEN_PLACES_PROVIDER ?? 'geoapify';
 }
 
+export interface SearchConfig {
+  apiKey: string;
+}
+
+/** Server-only web-search provider config (Tavily by default). */
+export function getSearchConfig(): SearchConfig {
+  assertServer('TAVILY_API_KEY');
+  const e = env();
+  if (!e.TAVILY_API_KEY) {
+    throw new ConfigurationError('Web search is not configured. Set TAVILY_API_KEY.');
+  }
+  return { apiKey: e.TAVILY_API_KEY };
+}
+
+/** Which web-search provider to use. Default 'tavily'. */
+export function getSearchProviderId(): string {
+  return env().EDEN_SEARCH_PROVIDER ?? 'tavily';
+}
+
 /** Optional fallback location for requests that name no place. */
 export function getDefaultLocation(): string | null {
   return env().EDEN_DEFAULT_LOCATION ?? null;
@@ -203,6 +226,7 @@ export function configStatus(): {
   supabaseServer: boolean;
   openai: boolean;
   places: boolean;
+  webSearch: boolean;
   speech: boolean;
 } {
   const e = env();
@@ -211,6 +235,7 @@ export function configStatus(): {
     supabaseServer: Boolean(e.NEXT_PUBLIC_SUPABASE_URL && e.SUPABASE_SERVICE_ROLE_KEY),
     openai: Boolean(e.OPENAI_API_KEY),
     places: Boolean(e.GEOAPIFY_API_KEY),
+    webSearch: Boolean(e.TAVILY_API_KEY),
     // Voice works if either provider is configured (OpenAI is the default).
     speech: Boolean(e.OPENAI_API_KEY || e.ELEVENLABS_API_KEY),
   };
