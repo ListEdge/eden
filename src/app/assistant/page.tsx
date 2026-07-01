@@ -1,18 +1,22 @@
 'use client';
 
 /**
- * Eden — Assistant (conversational, press to talk).
+ * Eden — the operating system surface.
  *
- * A chat with Eden: tap the mic and speak, or type. Eden remembers the
- * conversation, so follow-ups like "what about Thai?" or "which is closest?"
- * resolve in context. Each reply is shown and spoken back (via /api/eden/speak).
+ * A holographic, JARVIS-style console. Eden sits at the center as a living 3D
+ * neural core. Tap it to wake: the core docks to the top and the cockpit
+ * assembles beneath it. Speak (Web Speech API) or type in the dock; Eden
+ * remembers the conversation, speaks its replies (via /api/eden/run), and pulls
+ * rich output — business plans, place results — up as floating panels.
  *
- * Speech-in uses the browser's built-in Web Speech API where available (Chrome,
- * Edge, Safari); the typed input is the fallback, so the page works everywhere.
+ * The conversational core, voice, and plans are live. System Status, Active
+ * Projects and System Metrics are indicative for now — they become real as
+ * those subsystems are built.
  */
 
-import { useCallback, useMemo, useRef, useState } from 'react';
-import Link from 'next/link';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import * as THREE from 'three';
+import './os.css';
 
 /* ---- Minimal Web Speech API typings (not in standard lib.dom) ---- */
 interface SpeechResultAlt {
@@ -77,18 +81,32 @@ interface RunData {
   audio_content_type?: string | null;
 }
 
-function base64ToBlob(b64: string, type: string): Blob {
-  const bytes = atob(b64);
-  const arr = new Uint8Array(bytes.length);
-  for (let i = 0; i < bytes.length; i += 1) arr[i] = bytes.charCodeAt(i);
-  return new Blob([arr], { type });
-}
-
 interface ChatMessage {
   role: 'user' | 'eden';
   text: string;
   results?: PlaceResult[];
   plan?: PlanData;
+}
+
+type FloatContent =
+  | { kind: 'project'; name: string; sub: string }
+  | { kind: 'plan'; plan: PlanData }
+  | { kind: 'results'; title: string; results: PlaceResult[] };
+
+type CoreMode = 'idle' | 'listening' | 'thinking' | 'working';
+type V3 = [number, number, number];
+
+const PROJECTS: { name: string; sub: string }[] = [
+  { name: 'ListEdge', sub: 'Conjunctional sales network' },
+  { name: 'Website Studio', sub: 'Client sites' },
+  { name: 'Klyne Real Estate', sub: 'CRM + listings' },
+];
+
+function base64ToBlob(b64: string, type: string): Blob {
+  const bytes = atob(b64);
+  const arr = new Uint8Array(bytes.length);
+  for (let i = 0; i < bytes.length; i += 1) arr[i] = bytes.charCodeAt(i);
+  return new Blob([arr], { type });
 }
 
 function getRecognitionCtor(): SpeechRecognitionCtor | null {
@@ -100,20 +118,296 @@ function getRecognitionCtor(): SpeechRecognitionCtor | null {
   return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null;
 }
 
+function cx(...parts: (string | false | null | undefined)[]): string {
+  return parts.filter(Boolean).join(' ');
+}
+
+function wave(base: number, freq: number, phase: number): number[] {
+  return Array.from(Array(24).keys()).map((i) => Math.round(base + Math.sin(i * freq + phase) * 8));
+}
+
 export default function AssistantPage() {
   const recognitionSupported = useMemo(() => getRecognitionCtor() !== null, []);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const coreRef = useRef<HTMLCanvasElement | null>(null);
+  const modeRef = useRef<CoreMode>('idle');
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const feedRef = useRef<HTMLDivElement | null>(null);
 
+  const [awake, setAwake] = useState(false);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [listening, setListening] = useState(false);
   const [typed, setTyped] = useState('');
   const [busy, setBusy] = useState(false);
   const [speaking, setSpeaking] = useState(false);
-  const [phase, setPhase] = useState<'idle' | 'thinking' | 'speaking'>('idle');
   const [error, setError] = useState<string | null>(null);
   const [pendingAudioUrl, setPendingAudioUrl] = useState<string | null>(null);
+  const [floatContent, setFloatContent] = useState<FloatContent | null>(null);
+  const [clock, setClock] = useState('');
+  const [metrics, setMetrics] = useState<number[][]>([
+    wave(42, 0.7, 0),
+    wave(61, 0.55, 1),
+    wave(78, 0.5, 2),
+  ]);
+
+  const mode: CoreMode = listening
+    ? 'listening'
+    : busy
+      ? 'thinking'
+      : speaking
+        ? 'working'
+        : 'idle';
+
+  /* keep the animation loop's mode in sync without re-running the effect */
+  useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
+
+  /* lock scrolling while the OS is mounted */
+  useEffect(() => {
+    const htmlEl = document.documentElement;
+    const prevHtml = htmlEl.style.overflow;
+    const prevBody = document.body.style.overflow;
+    htmlEl.style.overflow = 'hidden';
+    document.body.style.overflow = 'hidden';
+    return () => {
+      htmlEl.style.overflow = prevHtml;
+      document.body.style.overflow = prevBody;
+    };
+  }, []);
+
+  /* clock */
+  useEffect(() => {
+    const tick = () => setClock(new Date().toLocaleTimeString('en-GB'));
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  /* ambient metrics — flow the sparklines over time */
+  useEffect(() => {
+    const bases = [42, 61, 78];
+    const jitter = (b: number) => Math.max(8, Math.min(96, b + (Math.random() * 22 - 11)));
+    const id = window.setInterval(() => {
+      setMetrics((prev) =>
+        prev.map((arr, k) => {
+          const next = arr.slice(1);
+          next.push(jitter(bases[k]));
+          return next;
+        }),
+      );
+    }, 1700);
+    return () => window.clearInterval(id);
+  }, []);
+
+  /* auto-scroll the conversation feed */
+  useEffect(() => {
+    const el = feedRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages]);
+
+  /* ---- the 3D neural core (runs once, client-only) ---- */
+  useEffect(() => {
+    const canvas = coreRef.current;
+    if (!canvas) return;
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+    let raf = 0;
+    let renderer: THREE.WebGLRenderer | null = null;
+    try {
+      renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setSize(560, 560, false);
+
+      const scene = new THREE.Scene();
+      scene.fog = new THREE.Fog(0x03060d, 3.4, 7.6);
+      const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+      camera.position.z = 5.3;
+      const group = new THREE.Group();
+      scene.add(group);
+
+      // soft radial glow sprite
+      const size = 64;
+      const cv = document.createElement('canvas');
+      cv.width = cv.height = size;
+      const g = cv.getContext('2d');
+      if (g) {
+        const gr = g.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+        gr.addColorStop(0, 'rgba(210,248,255,1)');
+        gr.addColorStop(0.4, 'rgba(70,205,255,.6)');
+        gr.addColorStop(1, 'rgba(30,120,220,0)');
+        g.fillStyle = gr;
+        g.fillRect(0, 0, size, size);
+      }
+      const tex = new THREE.CanvasTexture(cv);
+
+      // fibonacci-sphere nodes
+      const N = 340;
+      const R = 1.78;
+      const pos: V3[] = [];
+      for (let i = 0; i < N; i += 1) {
+        const y = 1 - (i / (N - 1)) * 2;
+        const r = Math.sqrt(1 - y * y);
+        const th = Math.PI * (3 - Math.sqrt(5)) * i;
+        const jt = 0.88 + Math.random() * 0.24;
+        pos.push([Math.cos(th) * r * R * jt, y * R * jt, Math.sin(th) * r * R * jt]);
+      }
+      const pg = new THREE.BufferGeometry();
+      pg.setAttribute('position', new THREE.Float32BufferAttribute(pos.flat(), 3));
+      group.add(
+        new THREE.Points(
+          pg,
+          new THREE.PointsMaterial({
+            size: 0.125,
+            map: tex,
+            transparent: true,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+            fog: true,
+            color: 0x9af0ff,
+          }),
+        ),
+      );
+
+      // neural connections
+      const seg: number[] = [];
+      const edges: [V3, V3][] = [];
+      let c = 0;
+      for (let i = 0; i < N && c < 880; i += 1) {
+        for (let j = i + 1; j < N && c < 880; j += 1) {
+          const a = pos[i];
+          const b = pos[j];
+          const dx = a[0] - b[0];
+          const dy = a[1] - b[1];
+          const dz = a[2] - b[2];
+          if (dx * dx + dy * dy + dz * dz < 0.34) {
+            seg.push(a[0], a[1], a[2], b[0], b[1], b[2]);
+            edges.push([a, b]);
+            c += 1;
+          }
+        }
+      }
+      const lg = new THREE.BufferGeometry();
+      lg.setAttribute('position', new THREE.Float32BufferAttribute(seg, 3));
+      group.add(
+        new THREE.LineSegments(
+          lg,
+          new THREE.LineBasicMaterial({
+            color: 0x1e9bff,
+            transparent: true,
+            opacity: 0.2,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+            fog: true,
+          }),
+        ),
+      );
+
+      // faint containment shell
+      group.add(
+        new THREE.LineSegments(
+          new THREE.WireframeGeometry(new THREE.SphereGeometry(2.12, 22, 16)),
+          new THREE.LineBasicMaterial({
+            color: 0x2f8fd8,
+            transparent: true,
+            opacity: 0.05,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+            fog: true,
+          }),
+        ),
+      );
+
+      // travelling data pulses
+      const PULSES = 16;
+      const pulseGeo = new THREE.BufferGeometry();
+      const pp = new Float32Array(PULSES * 3);
+      pulseGeo.setAttribute('position', new THREE.BufferAttribute(pp, 3));
+      const pulses: { e: [V3, V3]; t: number; sp: number }[] = [];
+      for (let i = 0; i < PULSES; i += 1) {
+        pulses.push({
+          e: edges.length ? edges[(Math.random() * edges.length) | 0] : [pos[0], pos[1]],
+          t: Math.random(),
+          sp: 0.006 + Math.random() * 0.01,
+        });
+      }
+      group.add(
+        new THREE.Points(
+          pulseGeo,
+          new THREE.PointsMaterial({
+            size: 0.2,
+            map: tex,
+            transparent: true,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+            fog: true,
+            color: 0xffffff,
+          }),
+        ),
+      );
+
+      // luminous core
+      const spr = new THREE.Sprite(
+        new THREE.SpriteMaterial({
+          map: tex,
+          transparent: true,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        }),
+      );
+      spr.scale.set(2.7, 2.7, 1);
+      group.add(spr);
+
+      const MAP: Record<CoreMode, [number, number, number, number]> = {
+        idle: [0.0021, 0.03, 0.72, 1],
+        listening: [0.0022, 0.075, 0.9, 1.4],
+        thinking: [0.007, 0.05, 1.05, 2.4],
+        working: [0.004, 0.04, 0.95, 1.8],
+      };
+      const S = { rot: 0.0021, amp: 0.03, glow: 0.72, spark: 1 };
+      let t = 0;
+
+      const loop = () => {
+        t += 0.004;
+        const v = MAP[modeRef.current] ?? MAP.idle;
+        S.rot += (v[0] - S.rot) * 0.05;
+        S.amp += (v[1] - S.amp) * 0.05;
+        S.glow += (v[2] - S.glow) * 0.05;
+        S.spark += (v[3] - S.spark) * 0.05;
+        group.rotation.y += S.rot;
+        group.rotation.x = Math.sin(t) * 0.16;
+        const sc = 1 + Math.sin(t * 1.7) * S.amp;
+        group.scale.set(sc, sc, sc);
+        spr.material.opacity = S.glow * 0.72 + Math.sin(t * 1.7) * 0.12;
+        for (let i = 0; i < PULSES; i += 1) {
+          const p = pulses[i];
+          p.t += p.sp * S.spark;
+          if (p.t >= 1) {
+            p.e = edges.length ? edges[(Math.random() * edges.length) | 0] : p.e;
+            p.t = 0;
+          }
+          const a = p.e[0];
+          const b = p.e[1];
+          pp[i * 3] = a[0] + (b[0] - a[0]) * p.t;
+          pp[i * 3 + 1] = a[1] + (b[1] - a[1]) * p.t;
+          pp[i * 3 + 2] = a[2] + (b[2] - a[2]) * p.t;
+        }
+        pulseGeo.attributes.position.needsUpdate = true;
+        renderer!.render(scene, camera);
+        raf = requestAnimationFrame(loop);
+      };
+      loop();
+    } catch {
+      /* WebGL unavailable — the CSS fallback glow remains visible */
+    }
+
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      if (renderer) renderer.dispose();
+    };
+  }, []);
 
   const playAudio = useCallback(async (url: string) => {
     try {
@@ -126,7 +420,7 @@ export default function AssistantPage() {
       setPendingAudioUrl(null);
     } catch {
       setSpeaking(false);
-      setPendingAudioUrl(url); // autoplay blocked — show a manual play button
+      setPendingAudioUrl(url);
     }
   }, []);
 
@@ -138,7 +432,6 @@ export default function AssistantPage() {
       setError(null);
       setPendingAudioUrl(null);
       setMessages((m) => [...m, { role: 'user', text: clean }]);
-      setPhase('thinking');
       try {
         const res = await fetch('/api/eden/run', {
           method: 'POST',
@@ -151,7 +444,6 @@ export default function AssistantPage() {
         const json = await res.json();
         if (!json.ok) {
           setError(json.error?.message ?? 'Eden could not process that request.');
-          setPhase('idle');
           return;
         }
         const data = json.data as RunData;
@@ -160,14 +452,17 @@ export default function AssistantPage() {
           ...m,
           { role: 'eden', text: data.reply, results: data.results, plan: data.plan },
         ]);
-        setPhase('idle');
+        if (data.plan) {
+          setFloatContent({ kind: 'plan', plan: data.plan });
+        } else if (data.results && data.results.length > 0) {
+          setFloatContent({ kind: 'results', title: 'Results', results: data.results });
+        }
         if (data.audio_base64) {
           const blob = base64ToBlob(data.audio_base64, data.audio_content_type ?? 'audio/mpeg');
           await playAudio(URL.createObjectURL(blob));
         }
       } catch {
         setError('Could not reach Eden. Check your connection and try again.');
-        setPhase('idle');
       } finally {
         setBusy(false);
       }
@@ -223,246 +518,505 @@ export default function AssistantPage() {
     setMessages([]);
     setError(null);
     setPendingAudioUrl(null);
-    setPhase('idle');
+    setFloatContent(null);
   }, []);
 
-  const statusText = !recognitionSupported
-    ? 'voice input not supported here — type below'
-    : listening
-      ? 'listening… tap to stop'
-      : phase === 'thinking'
-        ? 'eden is thinking…'
-        : phase === 'speaking' || speaking
-          ? 'eden is speaking…'
-          : messages.length === 0
-            ? 'tap to talk'
-            : 'tap to continue';
+  const wake = useCallback(() => {
+    setAwake(true);
+    window.setTimeout(() => inputRef.current?.focus(), 700);
+  }, []);
+
+  const sleep = useCallback(() => {
+    if (audioRef.current) audioRef.current.pause();
+    setFloatContent(null);
+    setAwake(false);
+  }, []);
+
+  const taskLabel = busy
+    ? 'Processing your request'
+    : speaking
+      ? 'Speaking'
+      : listening
+        ? 'Listening'
+        : messages.length === 0
+          ? 'Awaiting your first instruction'
+          : 'Ready';
 
   return (
-    <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-6 px-6 py-10 sm:py-14">
-      <header className="flex items-baseline justify-between">
-        <div className="flex items-baseline gap-3">
-          <span className="font-mono text-xl font-medium tracking-tight text-mist">eden</span>
-          <span className="font-mono text-xs text-faint">assistant</span>
+    <div className={cx('edenos', awake ? 'awake' : 'dormant', floatContent && 'focused')}>
+      <div className="amb">
+        <div className="glow g1" />
+        <div className="glow g2" />
+        <div className="glow g3" />
+      </div>
+      <div className="gridbg" />
+      <div className="scan" />
+
+      {/* the living core */}
+      <div
+        className="brain"
+        onClick={() => (awake ? sleep() : wake())}
+        role="button"
+        aria-label={awake ? 'Put Eden to sleep' : 'Wake Eden'}
+      >
+        <div className="core-fallback" />
+        <canvas id="core" ref={coreRef} />
+        <div className="tick" />
+        <div className="rings">
+          <div className="rg a" />
+          <div className="rg b" />
+          <div className="rg c" />
         </div>
-        <div className="flex items-center gap-4">
+      </div>
+
+      <div className="wake-hint" onClick={wake}>
+        <div className="t">EDEN</div>
+        <div className="s">tap the core to wake</div>
+      </div>
+
+      {/* top bar */}
+      <div className="topbar">
+        <div className="tb-l">
+          <div className="v">
+            EDEN<b>.</b>
+          </div>
+          <div className="statepill">
+            <i />
+            <span>{mode}</span>
+          </div>
           {messages.length > 0 ? (
-            <button
-              type="button"
-              onClick={newConversation}
-              className="font-mono text-[0.7rem] text-faint hover:text-muted"
-            >
-              new chat
+            <button type="button" className="newchat" onClick={newConversation}>
+              New chat
             </button>
           ) : null}
-          <Link href="/" className="font-mono text-[0.7rem] text-faint hover:text-muted">
-            status →
-          </Link>
         </div>
-      </header>
+        <div className="clock">
+          {clock}
+          <span className="dt">Christchurch</span>
+        </div>
+      </div>
 
-      {/* Conversation */}
-      {messages.length > 0 ? (
-        <section className="flex flex-col gap-3">
-          {messages.map((msg, i) => (
-            <div key={i} className="flex flex-col gap-2">
-              <div className={msg.role === 'user' ? 'flex justify-end' : 'flex justify-start'}>
-                <div
-                  className={[
-                    'max-w-[85%] rounded-lg px-4 py-2.5 text-sm leading-relaxed',
-                    msg.role === 'user'
-                      ? 'bg-verd/15 text-mist'
-                      : 'border border-edge bg-panel/60 text-mist',
-                  ].join(' ')}
-                >
-                <p>{msg.text}</p>
-                {msg.results && msg.results.length > 0 ? (
-                  <ul className="mt-2 flex flex-col divide-y divide-edge-soft border-t border-edge-soft">
-                    {msg.results.map((r, j) => (
-                      <li key={`${r.name}-${j}`} className="flex flex-col gap-0.5 py-2">
-                        <div className="flex items-baseline justify-between gap-3">
-                          <span className="text-sm text-mist">{r.name}</span>
-                          {typeof r.distanceMeters === 'number' ? (
-                            <span className="shrink-0 font-mono text-[0.65rem] text-faint">
-                              {(r.distanceMeters / 1000).toFixed(1)} km
-                            </span>
-                          ) : null}
-                        </div>
-                        {r.address ? <span className="text-xs text-muted">{r.address}</span> : null}
-                        {r.website ? (
-                          <a
-                            href={r.website}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="font-mono text-[0.7rem] text-verd hover:underline"
-                          >
-                            website →
-                          </a>
-                        ) : null}
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
+      {/* cockpit */}
+      <div className="os">
+        <div className="content">
+          {/* LEFT */}
+          <div className="col">
+            <div className="panel">
+              <div className="p-h">System Status</div>
+              <div className="p-body">
+                <div className="srow">
+                  <span className="lbl">Core Systems</span>
+                  <span className="val">
+                    <i />
+                    Online
+                  </span>
+                </div>
+                <div className="srow">
+                  <span className="lbl">Memory</span>
+                  <span className="val">
+                    <i />
+                    Stable
+                  </span>
+                </div>
+                <div className="srow">
+                  <span className="lbl">Reasoning</span>
+                  <span className="val">
+                    <i />
+                    Online
+                  </span>
+                </div>
+                <div className="srow">
+                  <span className="lbl">Execution</span>
+                  <span className="val warn">
+                    <i />
+                    Standby
+                  </span>
+                </div>
+                <div className="srow">
+                  <span className="lbl">Tool Registry</span>
+                  <span className="val">
+                    <i />
+                    Online
+                  </span>
+                </div>
+                <div className="srow">
+                  <span className="lbl">Voice</span>
+                  <span className="val">
+                    <i />
+                    {recognitionSupported ? 'Online' : 'Type only'}
+                  </span>
                 </div>
               </div>
-              {msg.plan ? <PlanView plan={msg.plan} /> : null}
             </div>
-          ))}
-        </section>
-      ) : (
-        <p className="py-8 text-center text-sm text-muted">
-          Talk to Eden about anything — think through an idea, ask a question, or
-          <br className="hidden sm:block" /> find somewhere to eat. It remembers the conversation.
-        </p>
-      )}
 
-      {/* Mic */}
-      <section className="flex flex-col items-center gap-4 py-2">
-        <button
-          type="button"
-          onClick={toggleListen}
-          disabled={busy || !recognitionSupported}
-          aria-label={listening ? 'Stop listening' : 'Start talking'}
-          className={[
-            'flex h-20 w-20 items-center justify-center rounded-full border transition-colors',
-            listening
-              ? 'border-verd bg-verd/15 text-verd eden-live'
-              : 'border-edge bg-panel text-muted hover:border-verd-dim hover:text-mist',
-            busy || !recognitionSupported ? 'cursor-not-allowed opacity-50' : 'cursor-pointer',
-          ].join(' ')}
-        >
-          <MicIcon />
-        </button>
-        <p className="h-4 text-center font-mono text-[0.7rem] uppercase tracking-[0.18em] text-faint">
-          {statusText}
-        </p>
-        {pendingAudioUrl ? (
-          <button
-            type="button"
-            onClick={() => void playAudio(pendingAudioUrl)}
-            className="rounded-md border border-verd-dim bg-verd/10 px-3 py-1.5 font-mono text-xs text-verd"
-          >
-            ▶ Play Eden&apos;s reply
-          </button>
-        ) : null}
-      </section>
+            <div className="panel">
+              <div className="p-h">Active Projects</div>
+              <div className="p-body">
+                {PROJECTS.map((p) => (
+                  <div
+                    key={p.name}
+                    className="proj"
+                    onClick={() => setFloatContent({ kind: 'project', name: p.name, sub: p.sub })}
+                  >
+                    <span className="nm">
+                      <span className="d" />
+                      {p.name}
+                    </span>
+                    <span className="badge">Active</span>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  className="newp"
+                  onClick={() => {
+                    if (!awake) wake();
+                    inputRef.current?.focus();
+                  }}
+                >
+                  + New Project
+                </button>
+              </div>
+            </div>
+          </div>
 
-      {error ? (
-        <div className="rounded-lg border border-edge bg-panel/60 px-4 py-3 text-sm text-muted">
-          {error}
+          {/* CENTER */}
+          <div className="col">
+            <div className="panel">
+              <div className="p-h">Current Task</div>
+              <div className="p-body">
+                <div className="task-txt">{taskLabel}</div>
+                <div className="pill">
+                  <i />
+                  {mode}
+                </div>
+                <div className="hintline">
+                  Eden turns intent into governed work. Ask a question, think through an idea, or
+                  find somewhere to eat — it keeps the thread.
+                </div>
+              </div>
+            </div>
+
+            <div className="panel">
+              <div className="p-h">Conversation Feed</div>
+              <div className="p-body">
+                <div className="feedscroll" ref={feedRef}>
+                  {messages.length === 0 ? (
+                    <p className="empty">
+                      No conversation yet. Tap the mic or type below to begin — Eden is listening.
+                    </p>
+                  ) : (
+                    messages.map((m, i) => (
+                      <div key={i} className={cx('fr', m.role === 'user' ? 'u' : 'e')}>
+                        <div className="av" />
+                        <div>
+                          <div className="who">{m.role === 'user' ? 'You' : 'Eden'}</div>
+                          <div className="tx">{m.text}</div>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* RIGHT */}
+          <div className="col">
+            <div className="panel">
+              <div className="p-h">System Metrics</div>
+              <div className="p-body">
+                <Metric label="Reasoning load" data={metrics[0]} />
+                <Metric label="Memory" data={metrics[1]} />
+                <Metric label="Network" data={metrics[2]} />
+              </div>
+            </div>
+
+            <div className="panel">
+              <div className="p-h">Quick Commands</div>
+              <div className="p-body">
+                <div className="qc">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!awake) wake();
+                      inputRef.current?.focus();
+                    }}
+                  >
+                    <span className="ic">+</span>New task
+                  </button>
+                  <button type="button" onClick={() => void submit('Find good restaurants near me')}>
+                    <span className="ic">◈</span>Restaurants near me
+                  </button>
+                  <button
+                    type="button"
+                    onClick={toggleListen}
+                    disabled={!recognitionSupported || busy}
+                  >
+                    <span className="ic">◉</span>Voice command
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
-      ) : null}
-
-      {/* Typed input */}
-      <div className="mt-auto flex items-center gap-2 border-t border-edge-soft pt-4">
-        <input
-          value={typed}
-          onChange={(e) => setTyped(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') onTypedSubmit();
-          }}
-          placeholder="…or type to Eden"
-          disabled={busy}
-          className="flex-1 rounded-md border border-edge bg-ink px-3 py-2 text-sm text-mist outline-none placeholder:text-faint focus:border-verd-dim"
-        />
-        <button
-          type="button"
-          onClick={onTypedSubmit}
-          disabled={busy || !typed.trim()}
-          className="rounded-md border border-edge bg-panel px-4 py-2 font-mono text-xs text-mist transition-colors hover:border-verd-dim disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          Send
-        </button>
-      </div>
-    </main>
-  );
-}
-
-function PlanField({ label, value }: { label: string; value?: string }) {
-  if (!value) return null;
-  return (
-    <div className="flex flex-col gap-0.5">
-      <span className="font-mono text-[0.6rem] uppercase tracking-wider text-faint">{label}</span>
-      <p className="text-sm leading-relaxed text-mist">{value}</p>
-    </div>
-  );
-}
-
-function PlanView({ plan }: { plan: PlanData }) {
-  const s = plan.plan;
-  return (
-    <div className="flex flex-col gap-5 rounded-lg border border-edge bg-panel/40 px-5 py-5">
-      <div className="flex flex-col gap-1">
-        <span className="font-mono text-[0.6rem] uppercase tracking-wider text-verd">Plan</span>
-        {plan.title ? <h2 className="text-base font-medium text-mist">{plan.title}</h2> : null}
-        {plan.concept ? <p className="text-sm leading-relaxed text-muted">{plan.concept}</p> : null}
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2">
-        <PlanField label="Problem" value={s.problem} />
-        <PlanField label="Solution" value={s.solution} />
-        <PlanField label="Target customer" value={s.target_customer} />
-        <PlanField label="Value proposition" value={s.value_proposition} />
-        <PlanField label="Market" value={s.market} />
-        <PlanField label="Business model" value={s.business_model} />
-        <PlanField label="Go-to-market" value={s.go_to_market} />
-        <PlanField label="Competition" value={s.competition} />
-        <PlanField label="Risks" value={s.risks} />
-      </div>
-
-      {plan.next_steps && plan.next_steps.length > 0 ? (
-        <div className="flex flex-col gap-1.5">
-          <span className="font-mono text-[0.6rem] uppercase tracking-wider text-faint">
-            Next steps
-          </span>
-          <ol className="flex flex-col gap-1">
-            {plan.next_steps.map((step, i) => (
-              <li key={i} className="text-sm text-mist">
-                <span className="text-faint">{i + 1}.</span> {step}
-              </li>
-            ))}
-          </ol>
+      {/* floating panel */}
+      <div className="float-wrap">
+        <div className="float">
+          {floatContent ? (
+            <FloatBody
+              content={floatContent}
+              onClose={() => setFloatContent(null)}
+              onFocusInput={() => {
+                setFloatContent(null);
+                inputRef.current?.focus();
+              }}
+            />
+          ) : null}
         </div>
-      ) : null}
+      </div>
 
-      <div className="flex flex-col gap-2 border-t border-edge-soft pt-4">
-        <span className="font-mono text-[0.6rem] uppercase tracking-wider text-verd">Branding</span>
-        {plan.branding?.name_ideas && plan.branding.name_ideas.length > 0 ? (
-          <div className="flex flex-wrap gap-2">
-            {plan.branding.name_ideas.map((n, i) => (
-              <span
+      {error ? <div className="errbar">{error}</div> : null}
+
+      {/* dock */}
+      <div className="dock">
+        <div className="dock-inner">
+          <input
+            ref={inputRef}
+            value={typed}
+            onChange={(e) => setTyped(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') onTypedSubmit();
+            }}
+            placeholder={busy ? 'Eden is thinking…' : 'Message Eden…'}
+            disabled={busy}
+          />
+          {pendingAudioUrl ? (
+            <button
+              type="button"
+              className="send"
+              title="Play Eden's reply"
+              onClick={() => void playAudio(pendingAudioUrl)}
+            >
+              ▶
+            </button>
+          ) : null}
+          <div className="wave">
+            {Array.from({ length: 24 }).map((_, i) => (
+              <i
                 key={i}
-                className="rounded-full border border-edge px-2.5 py-1 text-xs text-mist"
-              >
-                {n}
-              </span>
+                style={{
+                  animationDelay: `${i * 0.05}s`,
+                  opacity: listening || speaking || busy ? 0.9 : 0.4,
+                }}
+              />
             ))}
           </div>
-        ) : null}
-        <PlanField label="Positioning" value={plan.branding?.positioning} />
-        <PlanField label="Tone" value={plan.branding?.tone} />
-        <PlanField label="Visual direction" value={plan.branding?.visual_direction} />
+          <button
+            type="button"
+            className="send"
+            onClick={onTypedSubmit}
+            disabled={busy || !typed.trim()}
+            aria-label="Send"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="5" y1="12" x2="19" y2="12" />
+              <polyline points="13 6 19 12 13 18" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            className={cx('mic', listening && 'on')}
+            onClick={toggleListen}
+            disabled={busy || !recognitionSupported}
+            aria-label={listening ? 'Stop listening' : 'Talk to Eden'}
+          >
+            <svg viewBox="0 0 24 24">
+              <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z" />
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+              <line x1="12" y1="19" x2="12" y2="22" />
+            </svg>
+          </button>
+        </div>
       </div>
     </div>
   );
 }
 
-function MicIcon() {
+function Metric({ label, data }: { label: string; data: number[] }) {
+  const n = data.length;
+  const pts = data
+    .map((v, i) => {
+      const x = (i / (n - 1)) * 100;
+      const y = 24 - Math.max(2, Math.min(22, (v / 100) * 24));
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(' ');
   return (
-    <svg
-      width="26"
-      height="26"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.6"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z" />
-      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-      <line x1="12" y1="19" x2="12" y2="22" />
-    </svg>
+    <div className="met">
+      <div className="met-top">
+        <span className="l">{label}</span>
+        <span className="n">{Math.round(data[n - 1])}%</span>
+      </div>
+      <svg className="spark" viewBox="0 0 100 24" preserveAspectRatio="none">
+        <polyline className="fillp" points={`0,24 ${pts} 100,24`} />
+        <polyline points={pts} />
+      </svg>
+    </div>
+  );
+}
+
+function Field({ label, value }: { label: string; value?: string }) {
+  if (!value) return null;
+  return (
+    <div className="f">
+      <label>{label}</label>
+      <p>{value}</p>
+    </div>
+  );
+}
+
+function FloatBody({
+  content,
+  onClose,
+  onFocusInput,
+}: {
+  content: FloatContent;
+  onClose: () => void;
+  onFocusInput: () => void;
+}) {
+  if (content.kind === 'project') {
+    return (
+      <>
+        <div className="fh">
+          <div className="cap">Project</div>
+          <button type="button" className="fx" onClick={onClose} aria-label="Close">
+            ✕
+          </button>
+        </div>
+        <h2>{content.name}</h2>
+        <div className="sub">{content.sub} · Active</div>
+        <div className="fstats">
+          <div className="fstat">
+            <div className="k">Status</div>
+            <div className="val">Active</div>
+          </div>
+          <div className="fstat">
+            <div className="k">Stage</div>
+            <div className="val">Live</div>
+          </div>
+          <div className="fstat">
+            <div className="k">Health</div>
+            <div className="val">Good</div>
+          </div>
+        </div>
+        <div className="frow">
+          <span className="k">Workspace</span>
+          <span className="v">Coming soon</span>
+        </div>
+        <div className="frow">
+          <span className="k">Linked memory</span>
+          <span className="v">Enabled</span>
+        </div>
+        <div className="factions">
+          <button type="button" onClick={onClose}>
+            Close
+          </button>
+          <button type="button" className="solid" onClick={onFocusInput}>
+            Ask Eden about this
+          </button>
+        </div>
+      </>
+    );
+  }
+
+  if (content.kind === 'results') {
+    return (
+      <>
+        <div className="fh">
+          <div className="cap">Places</div>
+          <button type="button" className="fx" onClick={onClose} aria-label="Close">
+            ✕
+          </button>
+        </div>
+        <h2>Found {content.results.length}</h2>
+        <div className="sub">Nearby, ranked by relevance</div>
+        <div className="placelist">
+          {content.results.map((r, i) => (
+            <div className="placeitem" key={`${r.name}-${i}`}>
+              <div className="pn">
+                <span className="pname">{r.name}</span>
+                {typeof r.distanceMeters === 'number' ? (
+                  <span className="pdist">{(r.distanceMeters / 1000).toFixed(1)} km</span>
+                ) : null}
+              </div>
+              {r.address ? <div className="paddr">{r.address}</div> : null}
+              {r.website ? (
+                <a href={r.website} target="_blank" rel="noopener noreferrer">
+                  website →
+                </a>
+              ) : null}
+            </div>
+          ))}
+        </div>
+        <div className="factions">
+          <button type="button" className="solid" onClick={onClose}>
+            Done
+          </button>
+        </div>
+      </>
+    );
+  }
+
+  const p = content.plan;
+  const s = p.plan;
+  return (
+    <>
+      <div className="fh">
+        <div className="cap">Plan</div>
+        <button type="button" className="fx" onClick={onClose} aria-label="Close">
+          ✕
+        </button>
+      </div>
+      {p.title ? <h2>{p.title}</h2> : null}
+      {p.concept ? <p className="plan-lead">{p.concept}</p> : null}
+      <div className="fields">
+        <Field label="Problem" value={s.problem} />
+        <Field label="Solution" value={s.solution} />
+        <Field label="Customer" value={s.target_customer} />
+        <Field label="Value" value={s.value_proposition} />
+        <Field label="Market" value={s.market} />
+        <Field label="Model" value={s.business_model} />
+        <Field label="Go-to-market" value={s.go_to_market} />
+        <Field label="Competition" value={s.competition} />
+        <Field label="Risks" value={s.risks} />
+      </div>
+      {p.next_steps && p.next_steps.length > 0 ? (
+        <div className="steps">
+          {p.next_steps.map((step, i) => (
+            <div className="st" key={i}>
+              <b>{i + 1}</b>
+              {step}
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {p.branding?.name_ideas && p.branding.name_ideas.length > 0 ? (
+        <div className="names">
+          {p.branding.name_ideas.map((nm, i) => (
+            <span key={i}>{nm}</span>
+          ))}
+        </div>
+      ) : null}
+      <div className="factions">
+        <button type="button" onClick={onClose}>
+          Close
+        </button>
+        <button type="button" className="solid" onClick={onFocusInput}>
+          Refine with Eden
+        </button>
+      </div>
+    </>
   );
 }
