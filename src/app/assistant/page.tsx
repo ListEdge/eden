@@ -28,6 +28,7 @@ interface SpeechResult {
 }
 interface SpeechRecognitionEventLike {
   results: ArrayLike<SpeechResult>;
+  resultIndex?: number;
 }
 interface SpeechRecognitionLike {
   lang: string;
@@ -174,6 +175,15 @@ export default function AssistantPage() {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const feedRef = useRef<HTMLDivElement | null>(null);
   const briefedRef = useRef(false);
+  const submitRef = useRef<(text: string) => void>(() => {});
+  const wakeRef = useRef<() => void>(() => {});
+  const awakeRef = useRef(false);
+  const busyRef = useRef(false);
+  const speakingRef = useRef(false);
+  const ambientRef = useRef(false);
+  const ambientRecRef = useRef<SpeechRecognitionLike | null>(null);
+  const expectingCommandRef = useRef(false);
+  const commandTimeoutRef = useRef<number | null>(null);
 
   const [awake, setAwake] = useState(false);
   const [conversationId, setConversationId] = useState<string | null>(null);
@@ -188,6 +198,8 @@ export default function AssistantPage() {
   const [projects, setProjects] = useState<ProjectItem[]>([]);
   const [projectsLoaded, setProjectsLoaded] = useState(false);
   const [activeProject, setActiveProject] = useState<{ id: string; title: string } | null>(null);
+  const [ambient, setAmbient] = useState(false);
+  const [heardWake, setHeardWake] = useState(false);
   const [clock, setClock] = useState('');
   const [metrics, setMetrics] = useState<number[][]>([
     wave(42, 0.7, 0),
@@ -807,6 +819,174 @@ export default function AssistantPage() {
     [conversationId, refreshProjects],
   );
 
+  // Keep long-lived refs current so the always-on listener never uses stale state.
+  useEffect(() => {
+    submitRef.current = submit;
+    wakeRef.current = wake;
+    awakeRef.current = awake;
+    busyRef.current = busy;
+    speakingRef.current = speaking;
+  }, [submit, wake, awake, busy, speaking]);
+
+  const clearCommandTimeout = useCallback(() => {
+    if (commandTimeoutRef.current !== null) {
+      window.clearTimeout(commandTimeoutRef.current);
+      commandTimeoutRef.current = null;
+    }
+  }, []);
+
+  const armCommandTimeout = useCallback(() => {
+    clearCommandTimeout();
+    commandTimeoutRef.current = window.setTimeout(() => {
+      expectingCommandRef.current = false;
+      setHeardWake(false);
+    }, 12000);
+  }, [clearCommandTimeout]);
+
+  const stopAmbient = useCallback(() => {
+    clearCommandTimeout();
+    expectingCommandRef.current = false;
+    setHeardWake(false);
+    const rec = ambientRecRef.current;
+    ambientRecRef.current = null;
+    if (rec) {
+      rec.onend = null;
+      rec.onresult = null;
+      rec.onerror = null;
+      try {
+        rec.stop();
+      } catch {
+        // ignore
+      }
+    }
+  }, [clearCommandTimeout]);
+
+  const startAmbient = useCallback((): boolean => {
+    const Ctor = getRecognitionCtor();
+    if (!Ctor) return false;
+    const rec = new Ctor();
+    rec.lang = 'en-NZ';
+    rec.continuous = true;
+    rec.interimResults = false;
+
+    rec.onresult = (e) => {
+      // Ignore anything heard while Eden is thinking or speaking (avoids self-triggering).
+      if (busyRef.current || speakingRef.current) return;
+      const startIdx = typeof e.resultIndex === 'number' ? e.resultIndex : 0;
+      let text = '';
+      for (let i = startIdx; i < e.results.length; i += 1) {
+        const r = e.results[i];
+        if (r && r.isFinal) text += r[0].transcript;
+      }
+      text = text.trim();
+      if (!text) return;
+
+      const idx = text.toLowerCase().lastIndexOf('eden');
+      if (idx !== -1) {
+        const after = text
+          .slice(idx + 4)
+          .replace(/^[\s,.:;!?'"“”-]+/, '')
+          .trim();
+        const wasDormant = !awakeRef.current;
+        if (after.length >= 3) {
+          // "Eden, <command>" in one breath — act on it, skip the greeting.
+          if (wasDormant) {
+            briefedRef.current = true;
+            wakeRef.current();
+          }
+          expectingCommandRef.current = false;
+          clearCommandTimeout();
+          setHeardWake(false);
+          submitRef.current(after);
+        } else {
+          // Just "Eden" — greet (on first wake) and await the command.
+          if (wasDormant) wakeRef.current();
+          expectingCommandRef.current = true;
+          setHeardWake(true);
+          armCommandTimeout();
+        }
+      } else if (expectingCommandRef.current) {
+        expectingCommandRef.current = false;
+        clearCommandTimeout();
+        setHeardWake(false);
+        submitRef.current(text);
+      }
+    };
+
+    rec.onerror = (ev) => {
+      const err = ev.error;
+      if (err === 'not-allowed' || err === 'service-not-allowed') {
+        ambientRef.current = false;
+        setAmbient(false);
+        setError('Microphone access is needed for ambient mode. Allow it and try again.');
+        stopAmbient();
+      }
+      // Other errors (no-speech, aborted, transient network) are recovered by onend.
+    };
+
+    rec.onend = () => {
+      // Keep it continuous: restart if ambient is still on and this is the live instance.
+      if (ambientRef.current && ambientRecRef.current === rec) {
+        window.setTimeout(() => {
+          if (ambientRef.current && ambientRecRef.current === rec) {
+            try {
+              rec.start();
+            } catch {
+              // ignore rapid-restart errors
+            }
+          }
+        }, 350);
+      }
+    };
+
+    ambientRecRef.current = rec;
+    try {
+      rec.start();
+      return true;
+    } catch {
+      ambientRecRef.current = null;
+      return false;
+    }
+  }, [armCommandTimeout, clearCommandTimeout, stopAmbient]);
+
+  const toggleAmbient = useCallback(() => {
+    if (ambientRef.current) {
+      ambientRef.current = false;
+      setAmbient(false);
+      stopAmbient();
+      return;
+    }
+    if (!recognitionSupported) {
+      setError('Voice input is not supported in this browser. Try Chrome or Edge on desktop.');
+      return;
+    }
+    ambientRef.current = true;
+    setAmbient(true);
+    setError(null);
+    const ok = startAmbient();
+    if (!ok) {
+      ambientRef.current = false;
+      setAmbient(false);
+      setError('Could not start ambient listening.');
+    }
+  }, [recognitionSupported, startAmbient, stopAmbient]);
+
+  useEffect(() => {
+    return () => {
+      stopAmbient();
+    };
+  }, [stopAmbient]);
+
+  // While Eden is speaking, hold the spoken-command window; refresh it once quiet.
+  useEffect(() => {
+    if (!ambient) return;
+    if (speaking) {
+      clearCommandTimeout();
+    } else if (expectingCommandRef.current) {
+      armCommandTimeout();
+    }
+  }, [speaking, ambient, clearCommandTimeout, armCommandTimeout]);
+
   const taskLabel = busy
     ? 'Processing your request'
     : speaking
@@ -847,6 +1027,18 @@ export default function AssistantPage() {
       <div className="wake-hint" onClick={wake}>
         <div className="t">EDEN</div>
         <div className="s">tap the core to wake</div>
+        <button
+          type="button"
+          className={cx('ambient-dormant', ambient && 'on')}
+          onClick={(e) => {
+            e.stopPropagation();
+            toggleAmbient();
+          }}
+          disabled={!recognitionSupported}
+        >
+          <i />
+          {ambient ? (heardWake ? 'Listening…' : 'Ambient on — say “Eden”') : 'Enable ambient'}
+        </button>
       </div>
 
       {/* top bar */}
@@ -859,6 +1051,16 @@ export default function AssistantPage() {
             <i />
             <span>{mode}</span>
           </div>
+          <button
+            type="button"
+            className={cx('ambientpill', ambient && 'on')}
+            onClick={toggleAmbient}
+            disabled={!recognitionSupported}
+            title={ambient ? 'Ambient listening is on — say “Eden”' : 'Enable ambient listening'}
+          >
+            <i />
+            {ambient ? (heardWake ? 'Listening…' : 'Ambient on') : 'Ambient'}
+          </button>
           {activeProject ? (
             <div className="projchip" title={activeProject.title}>
               <i />
@@ -1030,7 +1232,7 @@ export default function AssistantPage() {
                   <button
                     type="button"
                     onClick={toggleListen}
-                    disabled={!recognitionSupported || busy}
+                    disabled={!recognitionSupported || busy || ambient}
                   >
                     <span className="ic">◉</span>Voice command
                   </button>
@@ -1112,7 +1314,8 @@ export default function AssistantPage() {
             type="button"
             className={cx('mic', listening && 'on')}
             onClick={toggleListen}
-            disabled={busy || !recognitionSupported}
+            disabled={busy || !recognitionSupported || ambient}
+            title={ambient ? 'Ambient mode is on — just say “Eden”' : undefined}
             aria-label={listening ? 'Stop listening' : 'Talk to Eden'}
           >
             <svg viewBox="0 0 24 24">
