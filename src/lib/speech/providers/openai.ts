@@ -19,7 +19,20 @@ export const openAISpeechProvider: SpeechProvider = {
   contentType: 'audio/mpeg',
 
   async synthesize(text: string, opts?: SpeechSynthesisOptions): Promise<ArrayBuffer> {
-    const { apiKey, model, voice } = getOpenAISpeechConfig();
+    const { apiKey, model, voice, instructions } = getOpenAISpeechConfig();
+    const resolvedModel = opts?.modelId ?? model;
+    // The `instructions` field steers delivery on the gpt-4o tts models; tts-1 rejects it.
+    const supportsInstructions = !resolvedModel.startsWith('tts-1');
+
+    const requestBody: Record<string, unknown> = {
+      model: resolvedModel,
+      voice: opts?.voiceId ?? voice,
+      input: text,
+      response_format: 'mp3',
+    };
+    if (supportsInstructions && instructions) {
+      requestBody.instructions = instructions;
+    }
 
     const res = await fetch(SPEECH_URL, {
       method: 'POST',
@@ -27,12 +40,7 @@ export const openAISpeechProvider: SpeechProvider = {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        model: opts?.modelId ?? model,
-        voice: opts?.voiceId ?? voice,
-        input: text,
-        response_format: 'mp3',
-      }),
+      body: JSON.stringify(requestBody),
     });
 
     if (!res.ok) {

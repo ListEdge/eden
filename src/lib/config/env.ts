@@ -48,6 +48,8 @@ const envSchema = z.object({
   // OpenAI voice (uses OPENAI_API_KEY). Works from a server on any OpenAI plan.
   OPENAI_TTS_MODEL: z.string().min(1).optional(),
   OPENAI_TTS_VOICE: z.string().min(1).optional(),
+  // Delivery style, steered on the gpt-4o tts models (ignored by tts-1).
+  OPENAI_TTS_INSTRUCTIONS: z.string().min(1).optional(),
 
   // Operational
   EDEN_LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).optional(),
@@ -199,7 +201,14 @@ export interface OpenAISpeechConfig {
   apiKey: string;
   model: string;
   voice: string;
+  instructions: string;
 }
+
+/** The default voice delivery — a composed, precise AI valet, in the JARVIS manner. */
+const DEFAULT_TTS_INSTRUCTIONS =
+  'Voice: a calm, refined, and precise male AI assistant in the manner of a capable British valet. ' +
+  'Tone: composed, understated, and quietly confident — courteous, but never effusive or theatrical. ' +
+  'Pacing: measured and unhurried, with clear, crisp articulation.';
 
 /** Server-only OpenAI voice config (reuses OPENAI_API_KEY). */
 export function getOpenAISpeechConfig(): OpenAISpeechConfig {
@@ -210,8 +219,10 @@ export function getOpenAISpeechConfig(): OpenAISpeechConfig {
   }
   return {
     apiKey: e.OPENAI_API_KEY,
-    model: e.OPENAI_TTS_MODEL ?? 'tts-1',
-    voice: e.OPENAI_TTS_VOICE ?? 'alloy',
+    // gpt-4o-mini-tts supports steerable delivery; onyx is a deep, composed voice.
+    model: e.OPENAI_TTS_MODEL ?? 'gpt-4o-mini-tts',
+    voice: e.OPENAI_TTS_VOICE ?? 'onyx',
+    instructions: e.OPENAI_TTS_INSTRUCTIONS ?? DEFAULT_TTS_INSTRUCTIONS,
   };
 }
 

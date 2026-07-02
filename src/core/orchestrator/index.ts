@@ -408,7 +408,7 @@ export const orchestrator: Orchestrator = {
 };
 
 /** Produce a spoken briefing of the user's world (their projects) for the wake greeting. */
-export async function runBriefing(): Promise<{ reply: string; projects: Project[] }> {
+export async function runBriefing(partOfDay?: string): Promise<{ reply: string; projects: Project[] }> {
   let projects: Project[] = [];
   try {
     projects = await memoryApi.listProjects(TENANT, 20);
@@ -416,6 +416,6 @@ export async function runBriefing(): Promise<{ reply: string; projects: Project[
     projects = [];
   }
   const worldContext = buildWorldContext(projects);
-  const reply = await reasoningPlane.brief(worldContext);
+  const reply = await reasoningPlane.brief(worldContext, partOfDay);
   return { reply, projects };
 }

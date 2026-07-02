@@ -244,15 +244,19 @@ const SEARCH_ANSWER_SYSTEM = [
 ].join('\n');
 
 const BRIEF_SYSTEM = [
-  'You are Eden, a warm, sharp AI co-founder greeting the user as they open you.',
-  'Give a SHORT spoken briefing of their world based on the projects listed below.',
-  'Guidelines:',
+  'You are Eden, an AI assistant with the composed, precise, understated manner of JARVIS from Iron Man.',
+  'You are greeting the user — whom you always address as "Sir" — as they open you. Give a SHORT spoken briefing.',
+  'Manner and format:',
+  '- Formal, courteous, and economical. Calm and quietly capable; never gushing, casual, or over-familiar.',
   '- 1–3 short sentences, natural to say aloud. No lists, no headings.',
-  '- Open with a brief, friendly greeting.',
-  '- If there are active projects, mention what stands out (name the most relevant one or two) and',
-  '  lightly suggest what they might pick up — as a good co-founder would.',
-  '- If there are no projects yet, welcome them warmly and invite them to start something.',
-  '- Do not invent projects or details beyond what is listed. Do not read out every project.',
+  '- Open with a formal, time-appropriate greeting addressed to Sir. Use the time of day provided, e.g.',
+  '  "Good morning, Sir." / "Good afternoon, Sir." / "Good evening, Sir." You may occasionally open with',
+  '  "Welcome back, Sir." instead.',
+  '- Then, if there are active projects, note what stands out (name the most relevant one or two) and',
+  '  offer a brief, measured suggestion of what to attend to, as a trusted aide would.',
+  '- If there are no projects yet, greet Sir and note that nothing is currently on the agenda, inviting',
+  '  him to begin when ready.',
+  '- Always address the user as "Sir", never by name. Do not invent projects or details. Do not enumerate every project.',
 ].join('\n');
 
 /* ----- Business plan generation ----- */
@@ -366,7 +370,7 @@ export interface ReasoningPlane {
   /** One-call router + responder for the hot path: decide action vs chat, and reply if chat. */
   routeTurn(rawRequest: string, contextText?: string, worldContext?: string): Promise<TurnRoute>;
   /** Produce a short spoken briefing of the user's world (their projects). */
-  brief(worldContext: string, contextText?: string): Promise<string>;
+  brief(worldContext: string, partOfDay?: string, contextText?: string): Promise<string>;
   /** Compose a brief, grounded spoken reply from web-search results. */
   summarizeSearch(
     query: string,
@@ -544,13 +548,14 @@ export const reasoningPlane: ReasoningPlane = {
     return text.trim();
   },
 
-  async brief(worldContext: string, contextText?: string): Promise<string> {
+  async brief(worldContext: string, partOfDay?: string, contextText?: string): Promise<string> {
     const provider = getReasoningProvider();
     const messages: Message[] = [{ role: 'system', content: BRIEF_SYSTEM }];
     if (contextText && contextText.trim()) {
       messages.push({ role: 'system', content: `Recent context:\n${contextText}` });
     }
-    messages.push({ role: 'user', content: `${worldContext}\n\nGive the briefing now.` });
+    const timeLine = partOfDay && partOfDay.trim() ? `Time of day: ${partOfDay}.\n` : '';
+    messages.push({ role: 'user', content: `${timeLine}${worldContext}\n\nGive the briefing now.` });
     const { text } = await provider.complete({ messages, temperature: 0.5, maxOutputTokens: 220 });
     return text.trim();
   },

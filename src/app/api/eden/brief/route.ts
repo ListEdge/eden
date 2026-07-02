@@ -16,8 +16,10 @@ import { getSpeechProvider } from '@/lib/speech';
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
-export const POST = withRoute(async (_request, { requestId }) => {
-  const { reply, projects } = await runBriefing();
+export const POST = withRoute(async (request, { requestId }) => {
+  const body = (await request.json().catch(() => ({}))) as { part_of_day?: unknown };
+  const partOfDay = typeof body.part_of_day === 'string' ? body.part_of_day : undefined;
+  const { reply, projects } = await runBriefing(partOfDay);
 
   let audio_base64: string | null = null;
   let audio_content_type: string | null = null;

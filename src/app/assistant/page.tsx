@@ -569,7 +569,13 @@ export default function AssistantPage() {
 
   const runBrief = useCallback(async () => {
     try {
-      const res = await fetch('/api/eden/brief', { method: 'POST' });
+      const h = new Date().getHours();
+      const partOfDay = h < 12 ? 'morning' : h < 18 ? 'afternoon' : 'evening';
+      const res = await fetch('/api/eden/brief', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ part_of_day: partOfDay }),
+      });
       const json = await res.json();
       if (json.ok && json.data.reply) {
         setMessages((m) => [...m, { role: 'eden', text: json.data.reply as string }]);
