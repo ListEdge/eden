@@ -113,6 +113,13 @@ type FloatContent =
   | { kind: 'weather'; weather: WeatherData };
 
 type CoreMode = 'idle' | 'listening' | 'thinking' | 'working';
+
+type StreamEvent =
+  | { type: 'meta'; conversation_id: string; action: string }
+  | { type: 'delta'; text: string }
+  | { type: 'final'; reply: string; audio_base64?: string | null; audio_content_type?: string | null }
+  | { type: 'defer'; conversation_id: string }
+  | { type: 'error'; message: string };
 type V3 = [number, number, number];
 
 interface ProjectItem {
@@ -460,6 +467,52 @@ export default function AssistantPage() {
     }
   }, []);
 
+  const applyRunData = useCallback(
+    (data: RunData) => {
+      setConversationId(data.conversation_id);
+      setMessages((m) => [
+        ...m,
+        { role: 'eden', text: data.reply, results: data.results, plan: data.plan },
+      ]);
+      if (data.plan) {
+        setFloatContent({ kind: 'plan', plan: data.plan });
+      } else if (data.web) {
+        setFloatContent({
+          kind: 'web',
+          query: data.web.query,
+          answer: data.web.answer,
+          results: data.web.results,
+        });
+      } else if (data.weather) {
+        setFloatContent({ kind: 'weather', weather: data.weather });
+      } else if (data.results && data.results.length > 0) {
+        setFloatContent({ kind: 'results', title: 'Results', results: data.results });
+      }
+      if (data.audio_base64) {
+        const blob = base64ToBlob(data.audio_base64, data.audio_content_type ?? 'audio/mpeg');
+        void playAudio(URL.createObjectURL(blob));
+      }
+    },
+    [playAudio],
+  );
+
+  const runViaRunEndpoint = useCallback(
+    async (clean: string, convId: string | undefined) => {
+      const res = await fetch('/api/eden/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ raw_request: clean, conversation_id: convId }),
+      });
+      const json = await res.json();
+      if (!json.ok) {
+        setError(json.error?.message ?? 'Eden could not process that request.');
+        return;
+      }
+      applyRunData(json.data as RunData);
+    },
+    [applyRunData],
+  );
+
   const submit = useCallback(
     async (text: string) => {
       const clean = text.trim();
@@ -469,42 +522,79 @@ export default function AssistantPage() {
       setPendingAudioUrl(null);
       setMessages((m) => [...m, { role: 'user', text: clean }]);
       try {
-        const res = await fetch('/api/eden/run', {
+        const res = await fetch('/api/eden/stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            raw_request: clean,
-            conversation_id: conversationId ?? undefined,
-          }),
+          body: JSON.stringify({ raw_request: clean, conversation_id: conversationId ?? undefined }),
         });
-        const json = await res.json();
-        if (!json.ok) {
-          setError(json.error?.message ?? 'Eden could not process that request.');
+        if (!res.ok || !res.body) {
+          await runViaRunEndpoint(clean, conversationId ?? undefined);
           return;
         }
-        const data = json.data as RunData;
-        setConversationId(data.conversation_id);
-        setMessages((m) => [
-          ...m,
-          { role: 'eden', text: data.reply, results: data.results, plan: data.plan },
-        ]);
-        if (data.plan) {
-          setFloatContent({ kind: 'plan', plan: data.plan });
-        } else if (data.web) {
-          setFloatContent({
-            kind: 'web',
-            query: data.web.query,
-            answer: data.web.answer,
-            results: data.web.results,
-          });
-        } else if (data.weather) {
-          setFloatContent({ kind: 'weather', weather: data.weather });
-        } else if (data.results && data.results.length > 0) {
-          setFloatContent({ kind: 'results', title: 'Results', results: data.results });
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let streaming = false;
+        let deferred = false;
+        let deferConvo: string | undefined;
+
+        let finished = false;
+        while (!finished) {
+          const { done, value } = await reader.read();
+          finished = done;
+          if (!value) continue;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() ?? '';
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            let ev: StreamEvent;
+            try {
+              ev = JSON.parse(trimmed) as StreamEvent;
+            } catch {
+              continue;
+            }
+            if (ev.type === 'meta') {
+              setConversationId(ev.conversation_id);
+              streaming = true;
+              setMessages((m) => [...m, { role: 'eden', text: '' }]);
+            } else if (ev.type === 'delta' && streaming) {
+              setMessages((m) => {
+                const copy = m.slice();
+                const last = copy[copy.length - 1];
+                if (last && last.role === 'eden') {
+                  copy[copy.length - 1] = { ...last, text: last.text + ev.text };
+                }
+                return copy;
+              });
+            } else if (ev.type === 'final') {
+              if (streaming && ev.reply) {
+                setMessages((m) => {
+                  const copy = m.slice();
+                  const last = copy[copy.length - 1];
+                  if (last && last.role === 'eden') {
+                    copy[copy.length - 1] = { ...last, text: ev.reply };
+                  }
+                  return copy;
+                });
+              }
+              if (ev.audio_base64) {
+                const blob = base64ToBlob(ev.audio_base64, ev.audio_content_type ?? 'audio/mpeg');
+                await playAudio(URL.createObjectURL(blob));
+              }
+            } else if (ev.type === 'defer') {
+              deferred = true;
+              deferConvo = ev.conversation_id;
+            } else if (ev.type === 'error') {
+              setError(ev.message ?? 'Eden had trouble responding.');
+            }
+          }
         }
-        if (data.audio_base64) {
-          const blob = base64ToBlob(data.audio_base64, data.audio_content_type ?? 'audio/mpeg');
-          await playAudio(URL.createObjectURL(blob));
+
+        if (deferred) {
+          await runViaRunEndpoint(clean, deferConvo ?? conversationId ?? undefined);
         }
       } catch {
         setError('Could not reach Eden. Check your connection and try again.');
@@ -512,7 +602,7 @@ export default function AssistantPage() {
         setBusy(false);
       }
     },
-    [busy, conversationId, playAudio],
+    [busy, conversationId, playAudio, runViaRunEndpoint],
   );
 
   const toggleListen = useCallback(() => {

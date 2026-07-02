@@ -67,6 +67,8 @@ export interface ReasoningProvider {
   readonly defaultModel: string;
   /** Free-text completion. */
   complete(request: CompletionRequest): Promise<CompletionResult>;
+  /** Streaming free-text completion: yields text deltas as they arrive. */
+  completeStream(request: CompletionRequest): AsyncIterable<string>;
   /** Schema-validated structured completion (preferred for planning/understanding). */
   completeStructured<S extends z.ZodTypeAny>(
     request: StructuredCompletionRequest<S>,

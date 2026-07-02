@@ -65,6 +65,27 @@ export class OpenAIReasoningProvider implements ReasoningProvider {
     }
   }
 
+  async *completeStream(request: CompletionRequest): AsyncIterable<string> {
+    const client = this.#getClient();
+    const model = request.model ?? this.defaultModel;
+    try {
+      const stream = await client.chat.completions.create({
+        model,
+        temperature: request.temperature ?? 0,
+        max_tokens: request.maxOutputTokens,
+        messages: request.messages.map((m) => ({ role: m.role, content: m.content })),
+        stream: true,
+      });
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta?.content;
+        if (delta) yield delta;
+      }
+    } catch (caught) {
+      const err = toEdenError(caught);
+      throw new EdenError('INTERNAL', `OpenAI stream failed: ${err.message}`, { cause: caught });
+    }
+  }
+
   async completeStructured<S extends z.ZodTypeAny>(
     request: StructuredCompletionRequest<S>,
   ): Promise<StructuredResult<z.infer<S>>> {

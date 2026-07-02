@@ -159,31 +159,36 @@ const CONVERSE_SYSTEM = [
 /** The ways Eden can handle a single turn. */
 export type TurnAction = 'find_place' | 'generate_plan' | 'web_search' | 'get_weather' | 'chat';
 
+const actionField = z
+  .union([
+    z.literal('find_place'),
+    z.literal('generate_plan'),
+    z.literal('web_search'),
+    z.literal('get_weather'),
+    z.literal('chat'),
+    z.string(),
+    z.null(),
+  ])
+  .transform((v): TurnAction => {
+    if (v === 'find_place' || v === 'generate_plan' || v === 'web_search' || v === 'get_weather') {
+      return v;
+    }
+    return 'chat';
+  })
+  .default('chat');
+
 const routeSchema = z.object({
-  action: z
-    .union([
-      z.literal('find_place'),
-      z.literal('generate_plan'),
-      z.literal('web_search'),
-      z.literal('get_weather'),
-      z.literal('chat'),
-      z.string(),
-      z.null(),
-    ])
-    .transform((v): TurnAction => {
-      if (
-        v === 'find_place' ||
-        v === 'generate_plan' ||
-        v === 'web_search' ||
-        v === 'get_weather'
-      ) {
-        return v;
-      }
-      return 'chat';
-    })
-    .default('chat'),
+  action: actionField,
   goal: coercedString,
   reply: coercedString,
+  cuisine: coercedNullableString,
+  location: coercedNullableString,
+  query: coercedString,
+});
+
+/** Lightweight classification (no reply) for the streaming path. */
+const classifySchema = z.object({
+  action: actionField,
   cuisine: coercedNullableString,
   location: coercedNullableString,
   query: coercedString,
@@ -194,6 +199,14 @@ export interface TurnRoute {
   action: TurnAction;
   goal: string;
   reply: string;
+  cuisine: string | null;
+  location: string | null;
+  query: string;
+}
+
+/** Result of classifying a turn (streaming path). */
+export interface TurnClassification {
+  action: TurnAction;
   cuisine: string | null;
   location: string | null;
   query: string;
@@ -233,6 +246,38 @@ const ROUTER_SYSTEM = [
   "software, or access the user's private accounts, calendar, or files. If asked for one of those, say",
   'so plainly and offer what you can do instead. When you need current facts, prefer web_search over',
   'guessing. Respond with JSON only.',
+].join('\n');
+
+const CLASSIFY_SYSTEM = [
+  'You are the fast router for Eden. Classify the user\'s message into ONE action. Do NOT write a reply.',
+  'Return a single JSON object with these keys:',
+  '- "action": one of "find_place", "generate_plan", "web_search", "get_weather", or "chat".',
+  '  • "find_place": wants to find a place to go now (restaurant, café, bar, venue).',
+  '  • "generate_plan": wants the written business plan / strategy produced now.',
+  '  • "web_search": wants current, factual, or up-to-date info from the web (news, prices, facts,',
+  '    research, "look it up", "latest on…", or anything you would not reliably know).',
+  '  • "get_weather": asking about the weather.',
+  '  • "chat": anything else — discussing or developing an idea, questions you can answer, general talk.',
+  '- "cuisine": if find_place and a cuisine is mentioned (e.g. "italian"), else null.',
+  '- "location": if find_place or get_weather, the area/city (from this message or earlier), else null.',
+  '- "query": if web_search, a clear standalone search query. Else "".',
+  '- "reply": always the empty string "". Do not write a reply.',
+  'Use the conversation context to resolve references. Respond with JSON only.',
+].join('\n');
+
+const STREAM_CHAT_SYSTEM = [
+  'You are Eden, a sharp, warm AI co-founder and personal assistant, speaking with the user.',
+  'You are a genuine thinking partner: when the user shares an idea, an objective, or a problem, act',
+  'like a great co-founder — ask one or two sharp, specific questions, challenge weak assumptions, and',
+  'help sharpen the thinking. Do not dump many questions at once. When an idea has taken enough shape,',
+  'offer to put together a full written plan.',
+  'Keep replies BRIEF and natural — 1–3 short sentences by default — since they are read aloud.',
+  "You are aware of the user's saved projects (listed below, when present). Reference or connect them",
+  'only when genuinely relevant; do not force a mention into every reply.',
+  'Be honest about limits: you can find places, search the web, check the weather, and write plans, but',
+  "you cannot yet book, call, email, message, pay, build or deploy software, or access the user's private",
+  'accounts, calendar, or files. If asked for one of those, say so plainly and offer what you can do.',
+  'Reply in plain prose — no markdown, no headings, no lists.',
 ].join('\n');
 
 const SEARCH_ANSWER_SYSTEM = [
@@ -369,6 +414,14 @@ export interface ReasoningPlane {
   converse(contextText: string, userMessage: string): Promise<string>;
   /** One-call router + responder for the hot path: decide action vs chat, and reply if chat. */
   routeTurn(rawRequest: string, contextText?: string, worldContext?: string): Promise<TurnRoute>;
+  /** Lean, fast classifier for the streaming path: decide the action only (no reply). */
+  classifyTurn(rawRequest: string, contextText?: string): Promise<TurnRoute>;
+  /** Stream a conversational reply token-by-token (used by the streaming path). */
+  streamConverse(
+    rawRequest: string,
+    contextText?: string,
+    worldContext?: string,
+  ): AsyncIterable<string>;
   /** Produce a short spoken briefing of the user's world (their projects). */
   brief(worldContext: string, partOfDay?: string, contextText?: string): Promise<string>;
   /** Compose a brief, grounded spoken reply from web-search results. */
@@ -558,6 +611,59 @@ export const reasoningPlane: ReasoningPlane = {
     messages.push({ role: 'user', content: `${timeLine}${worldContext}\n\nGive the briefing now.` });
     const { text } = await provider.complete({ messages, temperature: 0.5, maxOutputTokens: 220 });
     return text.trim();
+  },
+
+  async classifyTurn(rawRequest: string, contextText?: string): Promise<TurnRoute> {
+    const provider = getReasoningProvider();
+    const messages: Message[] = [{ role: 'system', content: CLASSIFY_SYSTEM }];
+    if (contextText && contextText.trim()) {
+      messages.push({ role: 'system', content: `Conversation so far:\n${contextText}` });
+    }
+    messages.push({ role: 'user', content: rawRequest });
+    try {
+      const { data } = await provider.completeStructured({
+        schema: routeSchema,
+        schemaName: 'TurnClassification',
+        temperature: 0,
+        maxOutputTokens: 160,
+        messages,
+      });
+      return {
+        action: data.action,
+        goal: data.goal || rawRequest,
+        reply: '',
+        cuisine: data.cuisine,
+        location: data.location,
+        query: data.query,
+      };
+    } catch {
+      const isPlace = looksLikePlaceSearch(rawRequest) || scanCuisine(rawRequest) !== null;
+      return {
+        action: isPlace ? 'find_place' : 'chat',
+        goal: rawRequest,
+        reply: '',
+        cuisine: scanCuisine(rawRequest),
+        location: null,
+        query: '',
+      };
+    }
+  },
+
+  async *streamConverse(
+    rawRequest: string,
+    contextText?: string,
+    worldContext?: string,
+  ): AsyncIterable<string> {
+    const provider = getReasoningProvider();
+    const messages: Message[] = [{ role: 'system', content: STREAM_CHAT_SYSTEM }];
+    if (worldContext && worldContext.trim()) {
+      messages.push({ role: 'system', content: worldContext });
+    }
+    if (contextText && contextText.trim()) {
+      messages.push({ role: 'system', content: `Conversation so far:\n${contextText}` });
+    }
+    messages.push({ role: 'user', content: rawRequest });
+    yield* provider.completeStream({ messages, temperature: 0.6, maxOutputTokens: 500 });
   },
 
   async generatePlan(rawRequest: string, contextText?: string): Promise<BusinessPlan> {

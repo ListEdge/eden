@@ -23,7 +23,7 @@ import { getReasoningProvider } from '@/lib/ai/registry';
 import { SYSTEM_PRINCIPAL_ID, SYSTEM_TENANT_ID } from '@/lib/config/constants';
 import { getDefaultLocation } from '@/lib/config/env';
 import { memoryApi, type ConversationTurn, type Project } from '@/core/memory';
-import { reasoningPlane, type BusinessPlan } from '@/core/reasoning';
+import { reasoningPlane, type BusinessPlan, type TurnRoute } from '@/core/reasoning';
 import { toolRegistry } from '@/core/tool-registry';
 import { ensureToolsRegistered, PLACES_SEARCH_TOOL, WEB_SEARCH_TOOL, WEATHER_TOOL } from '@/core/tools';
 import type { PlaceResult } from '@/lib/places';
@@ -418,4 +418,75 @@ export async function runBriefing(partOfDay?: string): Promise<{ reply: string; 
   const worldContext = buildWorldContext(projects);
   const reply = await reasoningPlane.brief(worldContext, partOfDay);
   return { reply, projects };
+}
+
+/** Resolve the conversation and load prior turns + project awareness (no writes). */
+export async function prepareTurnContext(conversationId?: string): Promise<{
+  convoId: string;
+  contextText: string;
+  worldContext: string;
+}> {
+  const convoId = conversationId ?? (await memoryApi.createConversation(TENANT, PRINCIPAL));
+  const [priorTurns, projects] = await Promise.all([
+    conversationId ? memoryApi.getRecentTurns(convoId, 8) : Promise.resolve<ConversationTurn[]>([]),
+    memoryApi.listProjects(TENANT, 20).catch(() => [] as Project[]),
+  ]);
+  return {
+    convoId,
+    contextText: buildContext(priorTurns),
+    worldContext: buildWorldContext(projects),
+  };
+}
+
+/** Events emitted while streaming a turn. */
+export type StreamEvent =
+  | { type: 'meta'; conversation_id: string; action: TurnRoute['action'] }
+  | { type: 'delta'; text: string }
+  | { type: 'final'; reply: string }
+  | { type: 'defer'; conversation_id: string }
+  | { type: 'error'; message: string };
+
+/**
+ * Stream a turn. Plain conversation is streamed token-by-token; any action that
+ * needs a tool or structured output (places, web, weather, plan) yields a
+ * `defer` event so the caller finishes it via the robust non-streaming path.
+ * Nothing is written to memory on the defer path (the /run call records it).
+ */
+export async function* runTurnStream(
+  rawRequest: string,
+  conversationId?: string,
+): AsyncGenerator<StreamEvent> {
+  const { convoId, contextText, worldContext } = await prepareTurnContext(conversationId);
+
+  let route: TurnRoute;
+  try {
+    route = await reasoningPlane.classifyTurn(rawRequest, contextText);
+  } catch {
+    yield { type: 'defer', conversation_id: convoId };
+    return;
+  }
+
+  if (route.action !== 'chat') {
+    yield { type: 'defer', conversation_id: convoId };
+    return;
+  }
+
+  yield { type: 'meta', conversation_id: convoId, action: 'chat' };
+  await memoryApi.appendTurn(convoId, TENANT, 'user', rawRequest);
+
+  let full = '';
+  try {
+    for await (const delta of reasoningPlane.streamConverse(rawRequest, contextText, worldContext)) {
+      full += delta;
+      yield { type: 'delta', text: delta };
+    }
+  } catch {
+    if (!full) {
+      full = "I'm having trouble responding right now — could you try that again?";
+      yield { type: 'delta', text: full };
+    }
+  }
+
+  await memoryApi.appendTurn(convoId, TENANT, 'assistant', full);
+  yield { type: 'final', reply: full };
 }
